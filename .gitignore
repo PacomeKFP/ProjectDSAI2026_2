@@ -1,0 +1,69 @@
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+MANIFEST
+
+# ── Jupyter ─────────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_meta/
+
+# ── Datasets (volumineuses, ne pas versionner) ──────────────────────────────────
+datasets/
+
+# ── Résultats, traces, logs ─────────────────────────────────────────────────────
+results/
+runs/                  # TensorBoard par défaut
+lightning_logs/
+
+# ── Nsight Systems ──────────────────────────────────────────────────────────────
+*.nsys-rep
+*.qdrep
+*.qdstrm
+*.sqlite
+*.nvprof
+*.ncu-rep
+
+# ── Checkpoints et poids ────────────────────────────────────────────────────────
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+
+# ── Dépendances extraites (reconstruites par setup.py) ─────────────────────────
+detectron2/
+
+# ── Environnements virtuels ─────────────────────────────────────────────────────
+venv/
+env/
+.env
+.venv/
+ENV/
+
+# ── IDEs ────────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# ── OS ──────────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+desktop.ini
+
+# ── Fichiers temporaires ────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.swp
+*~
+.claude/
+.vscode/

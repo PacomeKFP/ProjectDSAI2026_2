@@ -1,0 +1,28 @@
+# ── Deep Learning ──────────────────────────────────────────────────────────────
+torch>=2.0.0
+torchvision>=0.15.0
+
+# ── Vision / détection ─────────────────────────────────────────────────────────
+effdet                  # EfficientDet (inclut timm en dépendance)
+timm>=0.9.0             # backbones EfficientNet pour effdet
+
+# ── Données et évaluation ──────────────────────────────────────────────────────
+# Windows : si pycocotools échoue, utiliser :  pip install pycocotools-windows
+pycocotools
+opencv-python
+Pillow
+
+# ── Numérique / utilitaires ────────────────────────────────────────────────────
+numpy
+pandas
+psutil                  # détection mémoire libre (RAM/VRAM adaptive batch)
+tqdm                    # barre de progression dans setup.py
+
+# ── Profilage ──────────────────────────────────────────────────────────────────
+tensorboard             # export PyTorch Profiler + visualisation TensorBoard
+nvtx                    # annotations couleur Nsight Systems (optionnel)
+
+# ── Detectron2 ─────────────────────────────────────────────────────────────────
+# NON installé via pip — géré par setup.py (clone + extraction du package).
+# Si tu préfères l'installer directement :
+#   pip install 'git+https://github.com/facebookresearch/detectron2.git'
