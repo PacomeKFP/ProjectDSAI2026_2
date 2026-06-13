@@ -52,7 +52,6 @@ from torch.profiler import (
     ProfilerActivity,
     profile,
     record_function,
-    tensorboard_trace_handler,
 )
 
 
@@ -76,7 +75,7 @@ def _to_camel_case(tag: str) -> str:
 def _run_name(model_name: str, tag: str) -> str:
     tag_cc = _to_camel_case(tag)
     ts     = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{model_name}—{tag_cc}—{ts}"
+    return f"{model_name}__{tag_cc}__{ts}"
 
 
 def _supports_with_modules() -> bool:
@@ -142,14 +141,14 @@ def profile_with_pytorch(
 
     # ── Construction des kwargs profiler ──────────────────────────────────────
     profiler_kwargs = dict(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        activities=[ProfilerActivity.CPU],
         schedule=torch.profiler.schedule(
             wait=0,
             warmup=n_warmup,
             active=n_active,
             repeat=1,
         ),
-        on_trace_ready=tensorboard_trace_handler(str(tb_dir)),
+        # on_trace_ready=torch.profiler.tensorboard_trace_handler(dir_name=tb_dir, worker_name=model_name),
         record_shapes=True,
         profile_memory=True,
         with_stack=True,
@@ -159,12 +158,6 @@ def profile_with_pytorch(
         profiler_kwargs["with_modules"] = True
 
     # ── Boucle profilée ────────────────────────────────────────────────────────
-    # Note sur le schedule PyTorch Profiler :
-    #   on_trace_ready est déclenché au step() qui SUIT la fin de la phase active,
-    #   pas pendant le dernier step actif. Avec schedule(wait=0, warmup=W, active=A),
-    #   il faut W + A + 1 appels à prof.step() pour que le callback se déclenche.
-    #   On ajoute donc un step "vide" (sans forward) à la fin — inoffensif car le
-    #   schedule passe en état "closed" après repeat=1 et ignore tout step suivant.
     model.eval()
     with profile(**profiler_kwargs) as prof:
         for s in data[:n_total]:
@@ -178,9 +171,13 @@ def profile_with_pytorch(
 
                 del gpu
 
-            prof.step()   # avance wait → warmup → active
+            prof.step()
+    
 
-        prof.step()       # step +1 : déclenche on_trace_ready (transition active → closed)
+    # Export explicite de la trace Chrome JSON (.pt.trace.json)
+    # Lisible dans : chrome://tracing, ui.perfetto.dev, TensorBoard (profiler plugin)
+    trace_path = tb_dir / f"{model_name}.pt.trace.json"
+    # prof.export_chrome_trace(f"{model_name}.pt.trace.json")
 
     gc.collect()
     if device == "cuda":
@@ -208,8 +205,10 @@ def profile_with_pytorch(
     print(f"{'='*62}")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
     print(f"\n  Run         : {run}")
-    print(f"  TensorBoard : tensorboard --logdir {out_dir}")
-    print(f"  Perfetto    : ouvrir le .pt.trace.json de {tb_dir}")
+    # print(f"  Trace       : {trace_path}")
+    print(f"  Perfetto    : glisser le fichier sur ui.perfetto.dev")
+    print(f"  Chrome      : ouvrir chrome://tracing → Load → sélectionner le fichier")
+    print(f"  TensorBoard : tensorboard --logdir {tb_dir}")
     print(f"  Résumés     : {out_dir}/summary*.txt")
 
     return {
@@ -217,4 +216,5 @@ def profile_with_pytorch(
         "tb_dir":       str(tb_dir),
         "summary_path": str(summary_path),
         "key_averages": prof.key_averages(),
+        'profiler': prof,
     }
