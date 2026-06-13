@@ -1,71 +1,81 @@
 import cv2
 import numpy as np
 import torch
-from detectron2 import model_zoo
-from detectron2.checkpoint import DetectionCheckpointer
-from detectron2.config import get_cfg
-from detectron2.modeling import build_model
+from torchvision.models import resnet101, ResNet101_Weights
+from torchvision.models.detection import RetinaNet
+from torchvision.models.detection.backbone_utils import _resnet_fpn_extractor
+from torchvision.ops.feature_pyramid_network import LastLevelP6P7
+from torchvision.ops import misc as misc_nn_ops
 from utils.data_loader import read_rgb
 
-# Detectron2 is used only to load COCO-pretrained R101 weights.
-# The returned object is a plain nn.Module; no Detectron2 inference pipeline is used.
-# TODO: replace with a torchvision-based loader once R101 COCO weights are converted.
-
-# D2 pred_classes are 0-79 contiguous. COCO category IDs are non-consecutive (1–90, 10 gaps).
-# Simple +1 is wrong from index 11 onwards (e.g. contiguous 11 → cat_id 13, not 12).
-_COCO_CAT_IDS = torch.tensor([
-    1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20,
-   21, 22, 23, 24, 25, 27, 28, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
-   43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
-   63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86,
-   87, 88, 89, 90,
-], dtype=torch.long)
+# ⚠ AUCUN RetinaNet-R101 préentraîné COCO n'existe dans torchvision ni Detectron2.
+#   (D2 ne fournit que retinanet_R_50 ; torchvision que retinanet_resnet50_fpn[_v2].)
+#
+# On construit ici un RetinaNet avec backbone ResNet-101 préentraîné ImageNet + FPN,
+# en miroir exact de la construction torchvision de retinanet_resnet50_fpn, mais avec
+# resnet101 à la place de resnet50. La TÊTE de détection est initialisée ALÉATOIREMENT.
+#
+# Conséquences :
+#   • SPEED BENCHMARK valide : le coût de calcul (backbone + FPN + têtes conv) ne dépend
+#     pas des valeurs des poids. De plus, torchvision initialise le biais de la tête de
+#     classification avec prior_probability=0.01 → presque aucune détection ne passe le
+#     seuil → NMS léger → le forward mesuré reflète bien l'architecture R101.
+#   • MAP NON SIGNIFICATIVE : la tête n'étant pas entraînée, evaluate_map() renverra ~0.
+#     À utiliser uniquement pour la vitesse et les optimisations (compile/FP16/TS/TRT).
+#
+# Interface identique à models/retinanet_r50.py (entrée List[Tensor[3,H,W]]) → drop-in
+# pour benchmark_model(), run_map_evaluation() et le pipeline optimizations/.
 
 _SCALE = 640.0
 
 
-def _build(cfg, device):
-    cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Detection/retinanet_R_101_FPN_3x.yaml")
-    cfg.MODEL.DEVICE = device
-    model = build_model(cfg)
-    DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
-    return model.eval()
+def _build_retinanet_r101(num_classes=91, min_size=640, max_size=640,
+                          device="cuda", **kwargs):
+    """Construit RetinaNet + ResNet-101-FPN (backbone ImageNet, tête aléatoire)."""
+    backbone = resnet101(
+        weights=ResNet101_Weights.IMAGENET1K_V2,
+        norm_layer=misc_nn_ops.FrozenBatchNorm2d,   # convention détection (BN figée)
+    )
+    # _resnet_fpn_extractor : même config que torchvision retinanet_resnet50_fpn
+    #   returned_layers=[2,3,4] → C3,C4,C5 ; extra_blocks=P6,P7 calculés depuis P5
+    backbone = _resnet_fpn_extractor(
+        backbone, trainable_layers=3,
+        returned_layers=[2, 3, 4],
+        extra_blocks=LastLevelP6P7(256, 256),
+    )
+    model = RetinaNet(backbone, num_classes=num_classes,
+                      min_size=min_size, max_size=max_size, **kwargs)
+    return model.eval().to(device)
 
 
 # ── Profiling ──────────────────────────────────────────────────────────────────
 
 def load_model(device="cuda"):
-    """640×640 — standardised speed benchmark."""
-    cfg = get_cfg()
-    cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
-    cfg.INPUT.MIN_SIZE_TEST = 640
-    cfg.INPUT.MAX_SIZE_TEST = 640
-    return _build(cfg, device)
+    """640×640 — benchmark de vitesse standardisé. Backbone ImageNet, tête aléatoire."""
+    return _build_retinanet_r101(min_size=640, max_size=640, device=device)
 
 
 def preprocess(sample):
-    """Load + resize to 640×640 → D2 input dict with BGR float32 [0,255], height=640, width=640.
-    D2 applies pixel_mean/std internally."""
+    """Load image → resize to 640×640 → Tensor[3,H,W] float32 [0,1] CPU."""
     img = read_rgb(sample)
     img = cv2.resize(img, (640, 640))
-    img_bgr = img[:, :, ::-1].astype(np.float32)
-    tensor  = torch.from_numpy(img_bgr.copy()).permute(2, 0, 1)
-    return {"image": tensor, "height": 640, "width": 640}
+    img = img.astype(np.float32) / 255.0
+    return torch.from_numpy(img).permute(2, 0, 1)
 
 
 def collate(inputs, device):
-    """List[dict_cpu] → List[dict_gpu]."""
-    return [{**d, "image": d["image"].to(device)} for d in inputs]
+    """List[Tensor[3,H,W]] CPU → List[Tensor[3,H,W]] on device."""
+    return [t.to(device) for t in inputs]
 
 
 def postprocess(raw_item, orig_size):
-    """Boxes already in orig_size space (D2 rescales internally via height/width in input dict)."""
-    inst = raw_item["instances"]
-    return {
-        "boxes":  inst.pred_boxes.tensor.cpu(),
-        "labels": _COCO_CAT_IDS[inst.pred_classes.cpu()],
-        "scores": inst.scores.cpu(),
-    }
+    """Boxes in 640-space → rescale to original image coordinates."""
+    orig_h, orig_w = orig_size
+    sx, sy = orig_w / _SCALE, orig_h / _SCALE
+    boxes = raw_item["boxes"].clone()
+    boxes[:, [0, 2]] *= sx
+    boxes[:, [1, 3]] *= sy
+    return {"boxes": boxes, "labels": raw_item["labels"], "scores": raw_item["scores"]}
 
 
 def run_inference(model, sample, device="cuda"):
@@ -79,33 +89,34 @@ def run_inference(model, sample, device="cuda"):
 
 
 # ── COCO-standard MAP evaluation ───────────────────────────────────────────────
-# D2 resizes internally (default 800/1333) and outputs boxes in the coordinate
-# space of height/width passed in the input dict → no extra rescaling needed.
+# ⚠ Tête non entraînée → MAP ~0. Conservé pour cohérence d'interface avec r50/fcos.
 
 def load_model_eval(device="cuda"):
-    """Natural resolution (D2 default 800/1333) — COCO-standard evaluation."""
-    cfg = get_cfg()
-    cfg.merge_from_file(model_zoo.get_config_file("COCO-Detection/retinanet_R_101_FPN_3x.yaml"))
-    # No MIN/MAX size override → D2 default (800 short side, 1333 long side)
-    return _build(cfg, device)
+    """Résolution native (800/1333), score_thresh=0.01.
+    ⚠ Tête aléatoire → MAP non significative (vitesse uniquement)."""
+    print("[r101] ⚠ Tête de détection non entraînée — la MAP sera ~0 (vitesse uniquement).")
+    return _build_retinanet_r101(min_size=800, max_size=1333,
+                                 score_thresh=0.01, device=device)
 
 
 def preprocess_eval(sample):
-    """Load at original resolution → D2 input dict with orig height/width.
-    D2 handles resize internally; boxes output in orig_size space."""
-    orig_h, orig_w = sample.get("orig_size", (640, 640))
+    """Load at original resolution → Tensor[3,H,W] float32 [0,1] CPU.
+    torchvision handles internal resizing."""
     img = read_rgb(sample)
-    img_bgr = img[:, :, ::-1].astype(np.float32)
-    tensor  = torch.from_numpy(img_bgr.copy()).permute(2, 0, 1)
-    return {"image": tensor, "height": orig_h, "width": orig_w}
+    img = img.astype(np.float32) / 255.0
+    return torch.from_numpy(img).permute(2, 0, 1)
 
 
 def postprocess_eval(raw_item, orig_size):
-    """Identical to postprocess — boxes already in orig_size space."""
-    return postprocess(raw_item, orig_size)
+    """Boxes already in input-image coordinates (torchvision rescales internally)."""
+    return {
+        "boxes":  raw_item["boxes"],
+        "labels": raw_item["labels"],
+        "scores": raw_item["scores"],
+    }
 
 
 def evaluate_map(model, data, coco_gt, device="cuda"):
-    """COCO-standard MAP evaluation. Pass model from load_model_eval()."""
+    """COCO-standard MAP evaluation. ⚠ Renvoie ~0 (tête non entraînée)."""
     from eval.map_eval import run_map_evaluation
     return run_map_evaluation(model, data, coco_gt, preprocess_eval, collate, postprocess_eval, device)

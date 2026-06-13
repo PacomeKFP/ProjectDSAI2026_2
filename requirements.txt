@@ -1,9 +1,13 @@
+# Dépendances de base du projet (modèles, benchmark, évaluation, profilage).
+# Les dépendances d'OPTIMISATION (torch-tensorrt, onnx, onnxruntime-gpu, onnxsim)
+# ne sont PAS ici — elles sont installées directement dans optimization_full.ipynb.
+
 # ── Deep Learning ──────────────────────────────────────────────────────────────
 torch>=2.0.0
-torchvision>=0.15.0
+torchvision>=0.15.0     # RetinaNet R50/R101, FCOS R50 (R101 reconstruit depuis resnet101)
 
 # ── Vision / détection ─────────────────────────────────────────────────────────
-effdet                  # EfficientDet (inclut timm en dépendance)
+effdet                  # EfficientDet D4/D5/D6 (porte aussi timm en dépendance)
 timm>=0.9.0             # backbones EfficientNet pour effdet
 
 # ── Données et évaluation ──────────────────────────────────────────────────────
@@ -18,11 +22,12 @@ pandas
 psutil                  # détection mémoire libre (RAM/VRAM adaptive batch)
 tqdm                    # barre de progression dans setup.py
 
-# ── Profilage ──────────────────────────────────────────────────────────────────
+# ── Profilage (phase baseline) ─────────────────────────────────────────────────
 tensorboard             # export PyTorch Profiler + visualisation TensorBoard
 nvtx                    # annotations couleur Nsight Systems (optionnel)
 
 # ── Detectron2 ─────────────────────────────────────────────────────────────────
-# NON installé via pip — géré par setup.py (clone + extraction du package).
-# Si tu préfères l'installer directement :
+# Conservé par précaution (R101 est désormais en torchvision, mais on garde D2
+# disponible au cas où). NON installé via pip — géré par setup.py (clone + extraction).
+# Pour l'installer directement :
 #   pip install 'git+https://github.com/facebookresearch/detectron2.git'

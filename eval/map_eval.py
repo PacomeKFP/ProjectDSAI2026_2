@@ -24,19 +24,27 @@ except ImportError:
 # ── Memory helper ──────────────────────────────────────────────────────────────
 
 def _estimate_batch_size(device="cuda", image_h=640, image_w=640,
-                         safety=0.3, max_batch=200):
+                         safety=0.3, max_batch=32):
     """
     Auto batch_size based on available VRAM (GPU) or RAM (CPU).
-    Heuristic: 10× image tensor size per image (activations included).
+
+    Heuristic : 50× le tenseur input par image.
+      - Le facteur 10× sous-estime largement les modèles de détection avec FPN :
+        conv1 seul produit H/2 × W/2 × 64 activations, les pyramides P3-P7
+        accumulent des feature maps qui coexistent toutes en mémoire pendant le forward.
+      - À résolution native COCO (~800-1333 px), les activations sont 3-5× plus
+        grandes qu'à 640×640. Le facteur 50× donne une estimation conservative
+        qui couvre backbone + FPN + têtes de détection.
+      - max_batch=32 : cap dur pour éviter les OOM sur images haute résolution.
     """
-    bytes_per_img = image_h * image_w * 3 * 4 * 10
+    bytes_per_img = image_h * image_w * 3 * 4 * 50
 
     if device != "cpu" and torch.cuda.is_available():
         free_bytes, _ = torch.cuda.mem_get_info()
     elif _HAS_PSUTIL:
         free_bytes = psutil.virtual_memory().available
     else:
-        return 8  # safe fallback
+        return 4  # safe fallback
 
     usable = int(free_bytes * safety)
     return max(1, min(usable // bytes_per_img, max_batch))
@@ -87,6 +95,11 @@ def run_map_evaluation(
         with torch.no_grad():
             batch = collate_fn(cpu_inputs, device)
             raw   = model(batch)
+            # Modèle TorchScript de détection torchvision : forward renvoie
+            # (losses, detections) au lieu de detections seul. On garde detections.
+            if (isinstance(raw, tuple) and len(raw) == 2
+                    and isinstance(raw[0], dict) and isinstance(raw[1], list)):
+                raw = raw[1]
             # Move raw predictions to CPU immediately to free VRAM
             if isinstance(raw, (list, tuple)):
                 raw_cpu = [

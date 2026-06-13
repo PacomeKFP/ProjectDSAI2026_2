@@ -21,6 +21,14 @@ results/
 runs/                  # TensorBoard par défaut
 lightning_logs/
 
+# ── Sorties d'optimisation (modèles optimisés, exports) ─────────────────────────
+outputs/               # modèles compilés/TRT, exports ONNX (outputs/models, outputs/onnx)
+*.onnx                 # exports ONNX
+*.ts                   # modèles TorchScript sérialisés
+*.engine               # engines TensorRT
+*.trt
+*.plan
+
 # ── Nsight Systems ──────────────────────────────────────────────────────────────
 *.nsys-rep
 *.qdrep

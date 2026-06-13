@@ -4,20 +4,26 @@ setup.py
 Initialisation complète du projet.
 
 Actions :
-  1. Création des répertoires du projet
-  2. Téléchargement du dataset COCO val2017
+  1. Installation des dépendances pip (requirements.txt) — dont effdet, timm,
+     torchvision, pycocotools…  (PAS les dépendances d'optimisation : celles-ci
+     sont installées dans optimization_full.ipynb).
+  2. Création des répertoires du projet.
+  3. Téléchargement du dataset COCO val2017
        images      → datasets/coco/val2017/
        annotations → datasets/coco/annotations/
-  3. Extraction de Detectron2
+  4. Extraction de Detectron2
        clone  → temp (supprimé après)
        copie  → detectron2/   (package Python uniquement)
 
+Note : RetinaNet R101 est désormais reconstruit depuis torchvision (resnet101 + FPN).
+Detectron2 est conservé par précaution (utilisable si besoin), mais n'est plus requis
+par les modèles.
+
 Usage :
     python setup.py                   # tout
-    python setup.py --skip-coco       # seulement detectron2
-    python setup.py --skip-d2         # seulement COCO
-    python setup.py --coco-only       # alias --skip-d2
-    python setup.py --d2-only         # alias --skip-coco
+    python setup.py --skip-coco       # sans télécharger COCO
+    python setup.py --skip-deps       # sans installer les dépendances pip
+    python setup.py --skip-d2         # sans configurer Detectron2
 """
 
 import argparse
@@ -31,6 +37,7 @@ from pathlib import Path
 # ── Chemins cibles ─────────────────────────────────────────────────────────────
 
 ROOT        = Path(__file__).resolve().parent
+REQUIREMENTS = ROOT / "requirements.txt"
 COCO_DIR    = ROOT / "datasets" / "coco"
 VAL_DIR     = COCO_DIR / "val2017"
 ANN_DIR     = COCO_DIR / "annotations"
@@ -90,19 +97,41 @@ def _extract(zip_path: Path, target_dir: Path):
     _print("OK", 1)
 
 
-# ── Étape 1 : répertoires ──────────────────────────────────────────────────────
+# ── Étape 1 : dépendances pip ──────────────────────────────────────────────────
+
+def install_dependencies():
+    _print("─── Dépendances pip ────────────────────────────────────────")
+    if not REQUIREMENTS.exists():
+        _print("requirements.txt introuvable, skip.", 1)
+        return
+    _print("pip install -r requirements.txt", 1)
+    # Sortie non capturée → l'utilisateur voit la progression pip.
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)],
+        text=True,
+    )
+    if result.returncode != 0:
+        _print("ERREUR : pip install a échoué (voir la sortie ci-dessus).", 1)
+        sys.exit(1)
+    _print("Dépendances OK\n")
+
+
+# ── Étape 2 : répertoires ──────────────────────────────────────────────────────
 
 def create_dirs():
     _print("Création des répertoires…")
     for d in [VAL_DIR, ANN_DIR,
               ROOT / "results",
               ROOT / "results" / "profiler" / "pytorch",
-              ROOT / "results" / "profiler" / "nsight"]:
+              ROOT / "results" / "profiler" / "nsight",
+              ROOT / "results" / "optimization",
+              ROOT / "outputs" / "models",
+              ROOT / "outputs" / "onnx"]:
         d.mkdir(parents=True, exist_ok=True)
     _print("OK\n")
 
 
-# ── Étape 2 : COCO val2017 ─────────────────────────────────────────────────────
+# ── Étape 3 : COCO val2017 ─────────────────────────────────────────────────────
 
 def download_coco():
     _print("─── COCO val2017 ───────────────────────────────────────────")
@@ -126,7 +155,7 @@ def download_coco():
     _print("COCO OK\n")
 
 
-# ── Étape 3 : Detectron2 ───────────────────────────────────────────────────────
+# ── Étape 4 : Detectron2 (conservé par précaution) ─────────────────────────────
 
 def setup_detectron2():
     _print("─── Detectron2 ─────────────────────────────────────────────")
@@ -168,16 +197,20 @@ def setup_detectron2():
 
 def main():
     parser = argparse.ArgumentParser(description="Initialisation du projet")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--skip-coco", "--d2-only",  action="store_true",
-                       help="Ne pas télécharger COCO")
-    group.add_argument("--skip-d2",   "--coco-only", action="store_true",
-                       help="Ne pas configurer Detectron2")
+    parser.add_argument("--skip-deps", action="store_true",
+                        help="Ne pas installer les dépendances pip")
+    parser.add_argument("--skip-coco", action="store_true",
+                        help="Ne pas télécharger COCO")
+    parser.add_argument("--skip-d2", action="store_true",
+                        help="Ne pas configurer Detectron2")
     args = parser.parse_args()
 
     print("\n══════════════════════════════════════════════════════════")
     print("  Setup ProjectDSAI2026_2")
     print("══════════════════════════════════════════════════════════\n")
+
+    if not args.skip_deps:
+        install_dependencies()
 
     create_dirs()
 
