@@ -1,0 +1,47 @@
+==============================================================================
+MODÈLE : retinanet_r50   (module=models.retinanet_r50, famille=torchvision)
+==============================================================================
+Total paramètres : 38.20M  —  racine : RetinaNet
+
+(racine): RetinaNet  [38.199M, 100.0%]
+   backbone: BackboneWithFPN  [31.505M, 82.5%]
+      body: IntermediateLayerGetter  [23.508M, 61.5%]
+      fpn: FeaturePyramidNetwork  [7.997M, 20.9%]
+   anchor_generator: AnchorGenerator  [0.000M,  0.0%] (feuille)
+   head: RetinaNetHead  [6.693M, 17.5%]
+      classification_head: RetinaNetClassificationHead  [4.249M, 11.1%]
+      regression_head: RetinaNetRegressionHead  [2.444M,  6.4%]
+   transform: GeneralizedRCNNTransform  [0.000M,  0.0%] (feuille)
+
+  VÉRIFICATION get_subzone (famille=torchvision) :
+    sous-zone 'backbone  ' -> IntermediateLayerGetter  [23.508M, 61.5%]
+    sous-zone 'fpn       ' -> FeaturePyramidNetwork    [7.997M, 20.9%]
+    sous-zone 'head      ' -> RetinaNetHead            [6.693M, 17.5%]
+  ZONES GROSSIÈRES (whole-zone) :
+    'backbone  ' -> BackboneWithFPN          [31.505M, 82.5%]
+    'head      ' -> RetinaNetHead            [6.693M, 17.5%]
+  → Zone statique (params) : 38.20M / 38.20M (100.0%)
+  → Décodage + NMS : pas un sous-module (logique du forward) → reste eager
+
+==============================================================================
+MODÈLE : efficientdet_d4   (module=models.efficientdet_d4, famille=effdet)
+==============================================================================
+Total paramètres : 20.72M  —  racine : DetBenchPredict
+
+(racine): DetBenchPredict  [20.724M, 100.0%]
+   model: EfficientDet  [20.724M, 100.0%]
+      backbone: EfficientNetFeatures  [16.742M, 80.8%]
+      fpn: BiFpn  [3.350M, 16.2%]
+      class_net: HeadNet  [0.403M,  1.9%]
+      box_net: HeadNet  [0.229M,  1.1%]
+   anchors: Anchors  [0.000M,  0.0%] (feuille)
+
+  VÉRIFICATION get_subzone (famille=effdet) :
+    sous-zone 'backbone  ' -> EfficientNetFeatures     [16.742M, 80.8%]
+    sous-zone 'fpn       ' -> BiFpn                    [3.350M, 16.2%]
+    sous-zone 'class_net ' -> HeadNet                  [0.403M,  1.9%]
+    sous-zone 'box_net   ' -> HeadNet                  [0.229M,  1.1%]
+  ZONES GROSSIÈRES (whole-zone) :
+    'model     ' -> EfficientDet             [20.724M, 100.0%]
+  → Zone statique (params) : 20.72M / 20.72M (100.0%)
+  → Décodage + NMS : pas un sous-module (logique du forward) → reste eager

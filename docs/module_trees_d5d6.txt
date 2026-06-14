@@ -1,0 +1,45 @@
+==============================================================================
+MODÈLE : efficientdet_d5   (module=models.efficientdet_d5, famille=effdet)
+==============================================================================
+Total paramètres : 33.65M  —  racine : DetBenchPredict
+
+(racine): DetBenchPredict  [33.653M, 100.0%]
+   model: EfficientDet  [33.653M, 100.0%]
+      backbone: EfficientNetFeatures  [27.288M, 81.1%]
+      fpn: BiFpn  [5.406M, 16.1%]
+      class_net: HeadNet  [0.591M,  1.8%]
+      box_net: HeadNet  [0.368M,  1.1%]
+   anchors: Anchors  [0.000M,  0.0%] (feuille)
+
+  VÉRIFICATION get_subzone (famille=effdet) :
+    sous-zone 'backbone  ' -> EfficientNetFeatures     [27.288M, 81.1%]
+    sous-zone 'fpn       ' -> BiFpn                    [5.406M, 16.1%]
+    sous-zone 'class_net ' -> HeadNet                  [0.591M,  1.8%]
+    sous-zone 'box_net   ' -> HeadNet                  [0.368M,  1.1%]
+  ZONES GROSSIÈRES (whole-zone) :
+    'model     ' -> EfficientDet             [33.653M, 100.0%]
+  → Zone statique (params) : 33.65M / 33.65M (100.0%)
+  → Décodage + NMS : pas un sous-module (logique du forward) → reste eager
+
+==============================================================================
+MODÈLE : efficientdet_d6   (module=models.efficientdet_d6, famille=effdet)
+==============================================================================
+Total paramètres : 51.87M  —  racine : DetBenchPredict
+
+(racine): DetBenchPredict  [51.872M, 100.0%]
+   model: EfficientDet  [51.872M, 100.0%]
+      backbone: EfficientNetFeatures  [39.404M, 76.0%]
+      fpn: BiFpn  [10.584M, 20.4%]
+      class_net: HeadNet  [1.091M,  2.1%]
+      box_net: HeadNet  [0.793M,  1.5%]
+   anchors: Anchors  [0.000M,  0.0%] (feuille)
+
+  VÉRIFICATION get_subzone (famille=effdet) :
+    sous-zone 'backbone  ' -> EfficientNetFeatures     [39.404M, 76.0%]
+    sous-zone 'fpn       ' -> BiFpn                    [10.584M, 20.4%]
+    sous-zone 'class_net ' -> HeadNet                  [1.091M,  2.1%]
+    sous-zone 'box_net   ' -> HeadNet                  [0.793M,  1.5%]
+  ZONES GROSSIÈRES (whole-zone) :
+    'model     ' -> EfficientDet             [51.872M, 100.0%]
+  → Zone statique (params) : 51.87M / 51.87M (100.0%)
+  → Décodage + NMS : pas un sous-module (logique du forward) → reste eager

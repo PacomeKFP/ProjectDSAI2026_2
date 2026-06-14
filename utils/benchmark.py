@@ -41,6 +41,13 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+# Barre de progression (notebook ou terminal). No-op si tqdm absent.
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(it=None, **k):
+        return it
+
 
 # ── Utilitaire mémoire ────────────────────────────────────────────────────────
 
@@ -218,7 +225,7 @@ def benchmark_model(
         module_benchmark.attach(model)
 
     with torch.no_grad():
-        for s in data[:n_warmup]:
+        for s in tqdm(data[:n_warmup], desc="  warmup", leave=False):
             inp = preprocess_fn(s)
             gpu = collate_fn([inp], device)
             model(gpu)
@@ -230,7 +237,7 @@ def benchmark_model(
     times   = []
 
     with torch.no_grad():
-        for s in data[n_warmup : n_warmup + n_measure]:
+        for s in tqdm(data[n_warmup : n_warmup + n_measure], desc="  benchmark", leave=False):
             inp = preprocess_fn(s)
             gpu = collate_fn([inp], device)
             del inp

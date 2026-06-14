@@ -48,6 +48,19 @@ def postprocess(raw_item, orig_size):
     return {"boxes": boxes, "labels": det[:, 5].long() + 1, "scores": det[:, 4]}
 
 
+def postprocess_map(raw_item, orig_size):
+    """Postprocess pour l'ÉVAL MAP@640 — sans le « +1 » sur le label (qui casse
+    l'appariement des catégories COCO), échelle /640, seuil de score 0.05."""
+    orig_h, orig_w = orig_size
+    sx = orig_w / _SCALE_PROF
+    sy = orig_h / _SCALE_PROF
+    det   = raw_item[raw_item[:, 4] > 0.05]
+    boxes = det[:, :4].clone()
+    boxes[:, [0, 2]] *= sx
+    boxes[:, [1, 3]] *= sy
+    return {"boxes": boxes, "labels": det[:, 5].long(), "scores": det[:, 4]}
+
+
 def run_inference(model, sample, device="cuda"):
     inp   = preprocess(sample)
     batch = collate([inp], device)

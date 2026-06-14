@@ -1,0 +1,24 @@
+==============================================================================
+MODÈLE : fcos_r50   (module=models.fcos_r50, famille=torchvision)
+==============================================================================
+Total paramètres : 32.27M  —  racine : FCOS
+
+(racine): FCOS  [32.270M, 100.0%]
+   backbone: BackboneWithFPN  [27.324M, 84.7%]
+      body: IntermediateLayerGetter  [23.455M, 72.7%]
+      fpn: FeaturePyramidNetwork  [3.869M, 12.0%]
+   anchor_generator: AnchorGenerator  [0.000M,  0.0%] (feuille)
+   head: FCOSHead  [4.946M, 15.3%]
+      classification_head: FCOSClassificationHead  [2.572M,  8.0%]
+      regression_head: FCOSRegressionHead  [2.374M,  7.4%]
+   transform: GeneralizedRCNNTransform  [0.000M,  0.0%] (feuille)
+
+  VÉRIFICATION get_subzone (famille=torchvision) :
+    sous-zone 'backbone  ' -> IntermediateLayerGetter  [23.455M, 72.7%]
+    sous-zone 'fpn       ' -> FeaturePyramidNetwork    [3.869M, 12.0%]
+    sous-zone 'head      ' -> FCOSHead                 [4.946M, 15.3%]
+  ZONES GROSSIÈRES (whole-zone) :
+    'backbone  ' -> BackboneWithFPN          [27.324M, 84.7%]
+    'head      ' -> FCOSHead                 [4.946M, 15.3%]
+  → Zone statique (params) : 32.27M / 32.27M (100.0%)
+  → Décodage + NMS : pas un sous-module (logique du forward) → reste eager

@@ -54,6 +54,12 @@ from torch.profiler import (
     record_function,
 )
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(it=None, **k):
+        return it
+
 
 # ── Utilitaires ────────────────────────────────────────────────────────────────
 
@@ -218,3 +224,100 @@ def profile_with_pytorch(
         "key_averages": prof.key_averages(),
         'profiler': prof,
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Profilage léger pour l'orchestrateur — kernels / mémoire / opérations
+# ══════════════════════════════════════════════════════════════════════════════
+# Conçu d'après les remarques de l'utilisateur :
+#   • Pas d'export de trace (.json) : trop volumineux pour 1000 images, et
+#     l'export interne n'était pas fiablement retrouvé sur disque.
+#   • La fonction RETOURNE l'objet prof ; la sauvegarde (tables) est faite par
+#     l'appelant via profile_tables() — exactement le pattern demandé.
+#   • Active CPU + CUDA (l'ancien code n'activait que CPU → aucun kernel GPU).
+
+def run_profile(
+    model,
+    data,
+    preprocess_fn,
+    collate_fn,
+    n_warmup=20,
+    n_active=200,
+    device="cuda",
+):
+    """
+    Profile le forward (CPU+CUDA, mémoire, modules) sur n_active itérations.
+    Retourne l'objet `prof`. L'appelant extrait/sauvegarde via profile_tables().
+
+    On N'écrit aucun fichier ici et on n'exporte pas de trace : seules les
+    statistiques agrégées (key_averages) sont d'intérêt → légères, fouillables.
+    """
+    if len(data) < n_warmup + n_active:
+        n_active = max(1, len(data) - n_warmup)
+
+    activities = [ProfilerActivity.CPU]
+    if device == "cuda" and torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+
+    model.eval()
+    with torch.no_grad():
+        for s in data[:n_warmup]:
+            model(collate_fn([preprocess_fn(s)], device))
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    kwargs = dict(activities=activities, record_shapes=False,
+                  profile_memory=True, with_flops=True)
+    if _supports_with_modules():
+        kwargs["with_modules"] = True
+
+    with profile(**kwargs) as prof:
+        with torch.no_grad():
+            for s in tqdm(data[n_warmup : n_warmup + n_active],
+                          desc="  profile", leave=False):
+                with record_function("forward"):
+                    model(collate_fn([preprocess_fn(s)], device))
+        if device == "cuda":
+            torch.cuda.synchronize()
+
+    return prof
+
+
+def profile_tables(prof, top=None):
+    """
+    Convertit prof.key_averages() en DataFrame fouillable, trié par temps GPU.
+
+    Colonnes : op, count, temps CPU/CUDA (total + self, µs), mémoire CPU/CUDA
+    (total + self, octets), flops. Gère le renommage torch 2.x
+    (cuda_time_total → device_time_total, etc.).
+    """
+    import pandas as pd
+
+    def g(e, *names):
+        for n in names:
+            v = getattr(e, n, None)
+            if v is not None:
+                return v
+        return 0
+
+    rows = []
+    for e in prof.key_averages():
+        rows.append({
+            "op":            e.key,
+            "count":         e.count,
+            "cpu_us_total":  g(e, "cpu_time_total"),
+            "self_cpu_us":   g(e, "self_cpu_time_total"),
+            "cuda_us_total": g(e, "device_time_total", "cuda_time_total"),
+            "self_cuda_us":  g(e, "self_device_time_total", "self_cuda_time_total"),
+            "cpu_mem":       g(e, "cpu_memory_usage"),
+            "self_cpu_mem":  g(e, "self_cpu_memory_usage"),
+            "cuda_mem":      g(e, "device_memory_usage", "cuda_memory_usage"),
+            "self_cuda_mem": g(e, "self_device_memory_usage", "self_cuda_memory_usage"),
+            "flops":         g(e, "flops"),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("cuda_us_total", ascending=False).reset_index(drop=True)
+    if top:
+        df = df.head(top)
+    return df

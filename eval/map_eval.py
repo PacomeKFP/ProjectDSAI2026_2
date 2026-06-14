@@ -20,6 +20,12 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    def tqdm(it=None, **k):
+        return it
+
 
 # ── Memory helper ──────────────────────────────────────────────────────────────
 
@@ -86,7 +92,9 @@ def run_map_evaluation(
     predictions = []
     model.eval()
 
-    for i in range(0, len(data), batch_size):
+    n_batches = (len(data) + batch_size - 1) // batch_size
+    for i in tqdm(range(0, len(data), batch_size), total=n_batches,
+                  desc="  MAP eval", leave=False):
         chunk = data[i : i + batch_size]
 
         # Load + preprocess this chunk on CPU (one image at a time from disk)

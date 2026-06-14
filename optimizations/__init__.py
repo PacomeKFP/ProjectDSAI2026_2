@@ -40,7 +40,18 @@ from .ort_inference import build_ort_model, ORTModel
 from .tensorrt_fp16 import build_trt_fp16, load_trt_model
 from .tensorrt_int8 import build_trt_int8
 
-# Orchestrateur (stdlib uniquement au niveau module → import sûr)
+# Chemins de sortie (préfixe Drive sur Colab)
+from .paths import out_path, ensure_dir, set_prefix, project_prefix, describe as describe_paths
+
+# Optimisation par zone et sous-zone (consciente de l'architecture)
+from .zones import (
+    apply_zone_optimization, apply_subzone_plan, get_static_zone, get_subzone,
+    get_coarse_zones, capture_subzone_inputs, SUBZONES,
+    opt_torchscript, opt_compile, opt_cudagraphs,
+    opt_trt_fp16, opt_trt_fp16_folded, opt_trt_int8,
+)
+
+# Orchestrateur
 from .runner import (
     OptimizationRunner, RunConfig, ModelSpec, VariantSpec, DEFAULT_VARIANTS,
 )
@@ -61,6 +72,13 @@ __all__ = [
     "build_ort_model", "ORTModel",
     # tensorrt
     "build_trt_fp16", "load_trt_model", "build_trt_int8",
+    # paths
+    "out_path", "ensure_dir", "set_prefix", "project_prefix", "describe_paths",
+    # zones
+    "apply_zone_optimization", "apply_subzone_plan", "get_static_zone", "get_subzone",
+    "get_coarse_zones", "capture_subzone_inputs", "SUBZONES",
+    "opt_torchscript", "opt_compile", "opt_cudagraphs",
+    "opt_trt_fp16", "opt_trt_fp16_folded", "opt_trt_int8",
     # runner
     "OptimizationRunner", "RunConfig", "ModelSpec", "VariantSpec", "DEFAULT_VARIANTS",
 ]
