@@ -20,11 +20,7 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    def tqdm(it=None, **k):
-        return it
+from utils.tqdm_compat import tqdm
 
 
 # ── Memory helper ──────────────────────────────────────────────────────────────

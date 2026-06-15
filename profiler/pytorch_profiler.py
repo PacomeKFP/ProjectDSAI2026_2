@@ -54,11 +54,7 @@ from torch.profiler import (
     record_function,
 )
 
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    def tqdm(it=None, **k):
-        return it
+from utils.tqdm_compat import tqdm
 
 
 # ── Utilitaires ────────────────────────────────────────────────────────────────
@@ -213,7 +209,7 @@ def profile_with_pytorch(
     print(f"\n  Run         : {run}")
     # print(f"  Trace       : {trace_path}")
     print(f"  Perfetto    : glisser le fichier sur ui.perfetto.dev")
-    print(f"  Chrome      : ouvrir chrome://tracing → Load → sélectionner le fichier")
+    print(f"  Chrome      : ouvrir chrome://tracing -> Load -> sélectionner le fichier")
     print(f"  TensorBoard : tensorboard --logdir {tb_dir}")
     print(f"  Résumés     : {out_dir}/summary*.txt")
 

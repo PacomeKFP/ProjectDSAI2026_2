@@ -87,7 +87,7 @@ def optimize_with_torchscript(
     if prefer == "script":
         try:
             ts_model = torch.jit.script(model)
-            print("[TorchScript] ✓ Graphe capturé via torch.jit.script")
+            print("[TorchScript] [OK] Graphe capturé via torch.jit.script")
         except Exception as e:
             print(f"[TorchScript] script a échoué ({type(e).__name__}) — fallback trace")
             ts_model = _try_trace(model, example_input)
@@ -95,14 +95,14 @@ def optimize_with_torchscript(
         ts_model = _try_trace(model, example_input)
 
     if ts_model is None:
-        print("[TorchScript] ✗ Compilation impossible — retour du modèle original.")
+        print("[TorchScript] [X] Compilation impossible — retour du modèle original.")
         return model
 
     # ── 2. Freeze ─────────────────────────────────────────────────────────────
     if freeze:
         try:
             ts_model = torch.jit.freeze(ts_model)
-            print("[TorchScript] ✓ Freeze appliqué (poids inlinés, constant folding)")
+            print("[TorchScript] [OK] Freeze appliqué (poids inlinés, constant folding)")
         except Exception as e:
             print(f"[TorchScript] freeze ignoré ({type(e).__name__})")
 
@@ -110,11 +110,11 @@ def optimize_with_torchscript(
     if optimize:
         try:
             ts_model = torch.jit.optimize_for_inference(ts_model)
-            print("[TorchScript] ✓ optimize_for_inference (fusion Conv+BN+ReLU)")
+            print("[TorchScript] [OK] optimize_for_inference (fusion Conv+BN+ReLU)")
         except Exception as e:
             print(f"[TorchScript] optimize_for_inference ignoré ({type(e).__name__})")
 
-    print("  → Le premier appel forward finalise les optimisations JIT (warmup).")
+    print("  -> Le premier appel forward finalise les optimisations JIT (warmup).")
     return ts_model
 
 
@@ -126,7 +126,7 @@ def _try_trace(model: nn.Module, example_input) -> Optional[nn.Module]:
     try:
         # strict=False : tolère les sorties dict/list (détection)
         traced = torch.jit.trace(model, example_input, strict=False)
-        print("[TorchScript] ✓ Graphe capturé via torch.jit.trace")
+        print("[TorchScript] [OK] Graphe capturé via torch.jit.trace")
         return traced
     except Exception as e:
         print(f"[TorchScript] trace a échoué ({type(e).__name__}: {e})")
@@ -142,7 +142,7 @@ def save_torchscript(model: nn.Module, path: str) -> str:
         raise TypeError("Le modèle n'est pas un ScriptModule — compiler d'abord.")
     torch.jit.save(model, path)
     size_mb = Path(path).stat().st_size / 1e6
-    print(f"[TorchScript] Sauvegardé → {path}  ({size_mb:.1f} MB)")
+    print(f"[TorchScript] Sauvegardé -> {path}  ({size_mb:.1f} MB)")
     return path
 
 
@@ -150,5 +150,5 @@ def load_torchscript(path: str, device: str = "cuda") -> nn.Module:
     """Charge un modèle TorchScript sauvegardé (.ts)."""
     model = torch.jit.load(path, map_location=device)
     model.eval()
-    print(f"[TorchScript] Chargé ← {path}")
+    print(f"[TorchScript] Chargé <- {path}")
     return model

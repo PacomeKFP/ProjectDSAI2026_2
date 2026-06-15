@@ -41,12 +41,7 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
-# Barre de progression (notebook ou terminal). No-op si tqdm absent.
-try:
-    from tqdm.auto import tqdm
-except ImportError:
-    def tqdm(it=None, **k):
-        return it
+from utils.tqdm_compat import tqdm   # barre de progression (no-op si absent)
 
 
 # ── Utilitaire mémoire ────────────────────────────────────────────────────────

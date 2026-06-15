@@ -185,10 +185,10 @@ def build_trt_int8(
             _ = trt_model([sample_batch[0]])
         torch_tensorrt.save(trt_model, save_path)
         size_mb = Path(save_path).stat().st_size / 1e6
-        print(f"[TRT INT8] Engine sauvegardé → {save_path}  ({size_mb:.1f} MB)")
+        print(f"[TRT INT8] Engine sauvegardé -> {save_path}  ({size_mb:.1f} MB)")
 
     print(f"[TRT INT8] Compilation INT8 prête (algo={calibration_algo}).")
-    print("  → Vérifier la MAP après optimisation (dégradation typique : -0.5% à -2%).")
+    print("  -> Vérifier la MAP après optimisation (dégradation typique : -0.5% à -2%).")
     return trt_model
 
 
@@ -232,8 +232,8 @@ def layer_sensitivity_report(
 
     if errors:
         mean_err = np.mean(errors)
-        print(f"  Erreur moyenne boxes FP16↔INT8 : {mean_err:.4f} pixels")
+        print(f"  Erreur moyenne boxes FP16<->INT8 : {mean_err:.4f} pixels")
         if mean_err > 2.0:
-            print("  ⚠ Dégradation significative — considérer mixed precision (INT8 backbone seulement)")
+            print("  [!] Dégradation significative — considérer mixed precision (INT8 backbone seulement)")
         else:
-            print("  ✓ Dégradation acceptable")
+            print("  [OK] Dégradation acceptable")

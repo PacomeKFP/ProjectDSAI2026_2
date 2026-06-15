@@ -84,7 +84,7 @@ def to_fp16_autocast(model: nn.Module, dtype: torch.dtype = torch.float16) -> nn
 
     cc_major, _ = torch.cuda.get_device_capability(0)
     if cc_major < 7:
-        print("  ⚠ Tensor Cores FP16 disponibles à partir de Volta (CC 7.0+).")
+        print("  [!] Tensor Cores FP16 disponibles à partir de Volta (CC 7.0+).")
         print("    Le wrapper fonctionnera mais sans accélération matérielle FP16.")
 
     model.eval()

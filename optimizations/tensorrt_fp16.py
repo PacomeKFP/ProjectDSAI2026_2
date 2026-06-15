@@ -95,8 +95,8 @@ def build_trt_fp16(
 
     print(f"[TRT FP16] Modèle compilé avec torch_tensorrt backend.")
     print(f"  min_block_size={min_block_size}  workspace={workspace_gb:.1f} GB")
-    print("  → Premier appel forward déclenche la compilation TRT.")
-    print("  → Inclure dans n_warmup (minimum 3 appels supplémentaires).")
+    print("  -> Premier appel forward déclenche la compilation TRT.")
+    print("  -> Inclure dans n_warmup (minimum 3 appels supplémentaires).")
     return trt_model
 
 
@@ -139,7 +139,7 @@ def save_trt_model(
 
     torch_tensorrt.save(trt_ep, save_path, inputs=[sample_input])
     size_mb = Path(save_path).stat().st_size / 1e6
-    print(f"[TRT FP16] Engine sauvegardé → {save_path}  ({size_mb:.1f} MB)")
+    print(f"[TRT FP16] Engine sauvegardé -> {save_path}  ({size_mb:.1f} MB)")
     return save_path
 
 
@@ -154,7 +154,7 @@ def load_trt_model(path: str) -> nn.Module:
         raise ImportError("pip install torch-tensorrt")
 
     model = torch.export.load(path)
-    print(f"[TRT FP16] Engine chargé ← {path}")
+    print(f"[TRT FP16] Engine chargé <- {path}")
     return model
 
 
@@ -169,5 +169,5 @@ def _check_cuda() -> None:
     cc_major, cc_minor = torch.cuda.get_device_capability(0)
     print(f"[TRT FP16] GPU : {device_name}  (Compute Capability {cc_major}.{cc_minor})")
     if cc_major < 7:
-        print("  ⚠ Tensor Cores FP16 disponibles à partir de Volta (CC 7.0+).")
+        print("  [!] Tensor Cores FP16 disponibles à partir de Volta (CC 7.0+).")
         print("  Le modèle compilera mais les gains FP16 seront limités.")

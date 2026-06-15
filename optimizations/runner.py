@@ -43,7 +43,7 @@ from typing import Callable, List, Optional
 
 from .paths import ensure_dir, ensure_parent, project_prefix
 from .zones import (
-    apply_zone_optimization, apply_subzone_plan,
+    apply_zone_optimization, apply_subzone_plan, plan_mixed,
     opt_torchscript, opt_compile, opt_cudagraphs,
     opt_trt_fp16, opt_trt_fp16_folded, opt_trt_int8,
 )
@@ -78,26 +78,74 @@ class ModelSpec:
 
 @dataclass
 class VariantSpec:
-    name:         str
-    build:        Callable          # (model, mspec, runner) -> modèle optimisé
-    do_map:       bool = False
-    with_modules: bool = False
-    profile:      bool = True
-    requires:     Optional[str] = None   # "cuda" | "compile" | "trt" | "trt+int8"
+    name:            str
+    build:           Callable       # (model, mspec, runner) -> modèle optimisé
+    do_map:          bool = False
+    with_modules:    bool = False
+    profile:         bool = True
+    requires:        Optional[str] = None   # "cuda" | "compile" | "trt" | "trt+int8"
+    eval_batch_size: Optional[int] = None   # 1 pour les modèles à shape figée (TRT)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Builders de variantes (imports paresseux → runner importable sans torch)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_baseline(model, mspec, ctx):
+# Backends graphe pour _full() — un par clé, lazy-imported pour ne pas tirer
+# torch_tensorrt quand on ne fait que `none`/`compile`/etc.
+
+def _graph_noop(model, mspec, ctx):
     return model
 
 
-def build_fp16(model, mspec, ctx):
-    # FP16 = optimisation du MODÈLE COMPLET (autocast enveloppe tout le forward).
-    from optimizations import to_fp16_autocast
-    return to_fp16_autocast(model)
+def _graph_compile(model, mspec, ctx):
+    from optimizations import compile_model
+    return compile_model(model, backend=ctx.config.compile_backend,
+                         mode="default", dynamic=False)
+
+
+def _graph_cudagraphs(model, mspec, ctx):
+    from optimizations import compile_model
+    return compile_model(model, backend="cudagraphs", dynamic=False)
+
+
+def _graph_torchscript(model, mspec, ctx):
+    from optimizations import optimize_with_torchscript
+    m = mspec.module
+    ex = m.collate([m.preprocess(ctx.profile_data[0])], ctx.config.device)
+    method = "script" if mspec.family == "torchvision" else "trace"
+    return optimize_with_torchscript(model, example_input=ex, prefer=method)
+
+
+def _graph_trt(model, mspec, ctx):
+    from optimizations import build_trt_fp16
+    return build_trt_fp16(model, min_block_size=ctx.config.min_block_size)
+
+
+_GRAPH_BACKENDS = {
+    "none":        _graph_noop,
+    "compile":     _graph_compile,
+    "cudagraphs":  _graph_cudagraphs,
+    "torchscript": _graph_torchscript,
+    "trt":         _graph_trt,
+}
+
+
+def _full(graph: str, fp16: bool = False):
+    """Builder MODÈLE COMPLET : autocast FP16 optionnel, puis une optim de graphe.
+
+    graph ∈ _GRAPH_BACKENDS. Tout est appliqué au modèle entier (NMS inclus) —
+    certaines combinaisons sous-performent ou échouent (le NMS casse
+    compile/cudagraphs/TRT). compile_fp16 = _full("compile", fp16=True) était le
+    meilleur sur T4 (×2.35). dynamic=False fige les shapes (640).
+    """
+    backend = _GRAPH_BACKENDS[graph]
+    def build(model, mspec, ctx):
+        if fp16:
+            from optimizations import to_fp16_autocast
+            model = to_fp16_autocast(model)
+        return backend(model, mspec, ctx)
+    return build
 
 
 def _zone_ctx(ctx, calib=None) -> dict:
@@ -130,33 +178,48 @@ def build_zone_trt_int8(model, mspec, ctx):
     )
 
 
-# Plan per-sous-zone de la variante mixte : le bon outil par module.
-#   backbone → TensorRT (entrée connue [1,3,640,640], pas de capture)
-#   fpn + têtes → cudagraphs (pas d'exemple requis, supprime l'overhead de lancement)
-PLAN_MIXED = {
-    "torchvision": {"backbone": opt_trt_fp16, "fpn": opt_cudagraphs, "head": opt_cudagraphs},
-    "effdet":      {"backbone": opt_trt_fp16, "fpn": opt_cudagraphs,
-                    "class_net": opt_cudagraphs, "box_net": opt_cudagraphs},
-}
-
-
 def build_mixed_trt_cudagraphs(model, mspec, ctx):
+    # Plan défini dans zones.plan_mixed() — décision d'architecture.
     return apply_subzone_plan(
-        model, mspec.family, PLAN_MIXED[mspec.family], _zone_ctx(ctx),
+        model, mspec.family, plan_mixed()[mspec.family], _zone_ctx(ctx),
         device=ctx.config.device, size=ctx.config.size,
     )
 
 
 DEFAULT_VARIANTS: List[VariantSpec] = [
-    VariantSpec("baseline",        build_baseline,                  do_map=True,  with_modules=True,  profile=True, requires=None),
-    VariantSpec("fp16",            build_fp16,                      do_map=True,  with_modules=True,  profile=True, requires="cuda"),
+    # ── Configs VALIDÉES (speedup réel sur T4) — priorité ─────────────────────
+    VariantSpec("baseline",     _full("none"),               do_map=True,  with_modules=True,  profile=True, requires=None),
+    VariantSpec("fp16",         _full("none", fp16=True),    do_map=True,  with_modules=True,  profile=True, requires="cuda"),
+    VariantSpec("compile_fp16", _full("compile", fp16=True), do_map=False, with_modules=False, profile=True, requires="compile"),  # ×2.35 sur T4
+    # ── TensorRT (exigence de l'encadrant) — backbone, MAP à batch=1 ──────────
+    VariantSpec("zone_trt_fp16",   _zone_builder(opt_trt_fp16),        do_map=True, with_modules=False, profile=True, requires="trt", eval_batch_size=1),
+    VariantSpec("zone_trt_folded", _zone_builder(opt_trt_fp16_folded), do_map=True, with_modules=False, profile=True, requires="trt", eval_batch_size=1),
+    # ── Autres leviers (gain modeste sur T4, comparaison) ─────────────────────
+    VariantSpec("zone_cudagraphs",  _zone_builder(opt_cudagraphs),  do_map=False, with_modules=False, profile=True, requires="cuda"),
     VariantSpec("zone_torchscript", _zone_builder(opt_torchscript), do_map=False, with_modules=False, profile=True, requires=None),
-    VariantSpec("zone_compile",    _zone_builder(opt_compile),      do_map=False, with_modules=False, profile=True, requires="compile"),
-    VariantSpec("zone_cudagraphs", _zone_builder(opt_cudagraphs),   do_map=False, with_modules=False, profile=True, requires="cuda"),
-    VariantSpec("zone_trt_fp16",   _zone_builder(opt_trt_fp16),     do_map=True,  with_modules=False, profile=True, requires="trt"),
-    VariantSpec("zone_trt_folded", _zone_builder(opt_trt_fp16_folded), do_map=True, with_modules=False, profile=True, requires="trt"),
-    VariantSpec("mixed_trt_bb__cudagraphs_rest", build_mixed_trt_cudagraphs, do_map=True, with_modules=False, profile=True, requires="trt"),
-    VariantSpec("zone_trt_int8",   build_zone_trt_int8,             do_map=True,  with_modules=False, profile=True, requires="trt+int8"),
+    VariantSpec("zone_compile",     _zone_builder(opt_compile),     do_map=False, with_modules=False, profile=True, requires="compile"),
+    # ── Expérimental (« anales ») — à activer ensuite ─────────────────────────
+    VariantSpec("mixed_trt_bb__cudagraphs_rest", build_mixed_trt_cudagraphs, do_map=False, with_modules=False, profile=True, requires="trt"),
+    VariantSpec("zone_trt_int8", build_zone_trt_int8, do_map=True, with_modules=False, profile=True, requires="trt+int8", eval_batch_size=1),
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Variantes MODÈLE COMPLET (sans zones) — toutes les optims, individuelles et
+# combinées (autocast FP16). Réutilise la factory _full ci-dessus.
+# Modèles compilés/tracés/TRT : shape figée à batch=1 → MAP à batch=1.
+# ══════════════════════════════════════════════════════════════════════════════
+
+FULL_VARIANTS: List[VariantSpec] = [
+    VariantSpec("baseline",         _full("none"),                 do_map=True,  with_modules=True,  requires=None),
+    VariantSpec("fp16",             _full("none", fp16=True),      do_map=True,  with_modules=True,  requires="cuda"),
+    VariantSpec("torchscript",      _full("torchscript"),          do_map=True,  requires=None,      eval_batch_size=1),
+    VariantSpec("compile",          _full("compile"),              do_map=False, requires="compile"),
+    VariantSpec("cudagraphs",       _full("cudagraphs"),           do_map=False, requires="cuda"),
+    VariantSpec("trt_fp16",         _full("trt"),                  do_map=True,  requires="trt",     eval_batch_size=1),
+    VariantSpec("compile_fp16",     _full("compile", fp16=True),   do_map=True,  requires="compile", eval_batch_size=1),
+    VariantSpec("cudagraphs_fp16",  _full("cudagraphs", fp16=True),do_map=True,  requires="cuda",    eval_batch_size=1),
+    VariantSpec("torchscript_fp16", _full("torchscript", fp16=True),do_map=True, requires=None,      eval_batch_size=1),
 ]
 
 
@@ -171,9 +234,10 @@ def _real_benchmark_impl(model, data, preprocess, collate, n_warmup, n_measure, 
                            device=device, module_benchmark=module_benchmark)
 
 
-def _real_map_impl(model, data, coco_gt, preprocess, collate, postprocess, device):
+def _real_map_impl(model, data, coco_gt, preprocess, collate, postprocess, device, batch_size=None):
     from eval.map_eval import run_map_evaluation
-    return run_map_evaluation(model, data, coco_gt, preprocess, collate, postprocess, device)
+    return run_map_evaluation(model, data, coco_gt, preprocess, collate, postprocess,
+                              device, batch_size=batch_size)
 
 
 def _real_profile_impl(model, data, preprocess, collate, n_warmup, n_active, device):
@@ -189,7 +253,24 @@ def _real_mb_factory():
 
 
 def _free_gpu():
+    """Nettoyage AGRESSIF entre variantes — INDISPENSABLE.
+
+    torch.compile / cudagraphs / TRT laissent un état GLOBAL dans le processus
+    (caches inductor, pools mémoire cudagraph, contextes TRT). Sans reset, cet
+    état pollue les variantes suivantes : le speedup se dégrade avec l'ordre
+    d'exécution et les cudagraphs finissent par se corrompre. torch.compiler.reset
+    appelle déjà torch._dynamo.reset en interne — un seul reset suffit.
+    """
     import gc
+    try:
+        import torch
+        if hasattr(torch, "compiler") and hasattr(torch.compiler, "reset"):
+            torch.compiler.reset()
+        else:                                       # vieux torch sans torch.compiler
+            import torch._dynamo as _dynamo
+            _dynamo.reset()
+    except Exception:
+        pass
     gc.collect()
     try:
         import torch
@@ -353,7 +434,7 @@ class OptimizationRunner:
                 maps = self.map_impl(
                     optimized, self.eval_data, self.coco_gt,
                     mspec.module.preprocess, mspec.module.collate,
-                    post, self.config.device,
+                    post, self.config.device, spec.eval_batch_size,
                 )
                 self._save_json("eval", mspec.name, spec.name, maps)
                 ap, ap50, ap75 = (round(maps[k], 4) for k in ("AP", "AP50", "AP75"))

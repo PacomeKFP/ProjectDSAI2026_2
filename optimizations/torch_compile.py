@@ -80,8 +80,8 @@ def compile_model(
     model.eval()
 
     if backend == "inductor" and not has_triton():
-        print("[torch.compile] ⚠ backend 'inductor' demandé mais Triton absent.")
-        print("  → Bascule automatique sur 'cudagraphs'.")
+        print("[torch.compile] [!] backend 'inductor' demandé mais Triton absent.")
+        print("  -> Bascule automatique sur 'cudagraphs'.")
         backend = "cudagraphs"
 
     # ── Backend inductor : utilise `mode` (Triton codegen) ────────────────────
@@ -89,7 +89,7 @@ def compile_model(
         if mode not in _INDUCTOR_MODES:
             raise ValueError(f"mode doit être parmi {_INDUCTOR_MODES}, reçu {mode!r}")
         if mode == "reduce-overhead":
-            print("[torch.compile] ⚠ mode='reduce-overhead' active cudagraphs →")
+            print("[torch.compile] [!] mode='reduce-overhead' active cudagraphs ->")
             print("  risque d'incompatibilité avec le NMS (shapes dynamiques).")
         compiled = torch.compile(model, mode=mode, fullgraph=fullgraph, dynamic=dynamic)
         print(f"[torch.compile] backend=inductor  mode={mode!r}  dynamic={dynamic}")
@@ -99,7 +99,7 @@ def compile_model(
     elif backend == "cudagraphs":
         compiled = torch.compile(model, backend="cudagraphs", fullgraph=fullgraph, dynamic=dynamic)
         print("[torch.compile] backend=cudagraphs")
-        print("  ⚠ Capture de graphe à shapes FIXES — incompatible avec le NMS dynamique")
+        print("  [!] Capture de graphe à shapes FIXES — incompatible avec le NMS dynamique")
         print("    des détecteurs complets. À réserver au backbone seul.")
 
     # ── Autres backends (eager, aot_eager, …) ─────────────────────────────────
@@ -107,7 +107,7 @@ def compile_model(
         compiled = torch.compile(model, backend=backend, fullgraph=fullgraph, dynamic=dynamic)
         print(f"[torch.compile] backend={backend!r}  dynamic={dynamic}")
 
-    print("  → Inclure le premier appel dans n_warmup (≥ 5 itérations de marge).")
+    print("  -> Inclure le premier appel dans n_warmup (>= 5 itérations de marge).")
     return compiled
 
 
@@ -121,5 +121,5 @@ def save_compiled(model: nn.Module, path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     underlying = getattr(model, "_orig_mod", model)
     torch.save(underlying.state_dict(), path)
-    print(f"[torch.compile] state_dict sauvegardé → {path}")
+    print(f"[torch.compile] state_dict sauvegardé -> {path}")
     print("  Recharger : load_model() puis compile_model().")

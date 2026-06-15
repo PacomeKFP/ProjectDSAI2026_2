@@ -53,7 +53,8 @@ from .zones import (
 
 # Orchestrateur
 from .runner import (
-    OptimizationRunner, RunConfig, ModelSpec, VariantSpec, DEFAULT_VARIANTS,
+    OptimizationRunner, RunConfig, ModelSpec, VariantSpec,
+    DEFAULT_VARIANTS, FULL_VARIANTS,
 )
 
 __all__ = [
@@ -80,5 +81,6 @@ __all__ = [
     "opt_torchscript", "opt_compile", "opt_cudagraphs",
     "opt_trt_fp16", "opt_trt_fp16_folded", "opt_trt_int8",
     # runner
-    "OptimizationRunner", "RunConfig", "ModelSpec", "VariantSpec", "DEFAULT_VARIANTS",
+    "OptimizationRunner", "RunConfig", "ModelSpec", "VariantSpec",
+    "DEFAULT_VARIANTS", "FULL_VARIANTS",
 ]

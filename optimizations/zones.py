@@ -45,6 +45,26 @@ SUBZONES = {
 }
 
 
+def plan_mixed():
+    """Plan per-sous-zone de la variante mixte : un outil par module.
+
+    Backbone → TensorRT (entrée connue [1,3,640,640], pas de capture nécessaire).
+    Tout le reste → cudagraphs (pas d'exemple requis, supprime l'overhead de
+    lancement des nombreux petits kernels FPN/têtes).
+
+    Importé paresseusement (opt_trt_fp16 tire torch_tensorrt à la construction
+    du plan). Vit ici, à côté de SUBZONES, parce que c'est une décision
+    d'architecture, pas d'orchestration.
+    """
+    return {
+        family: {
+            zone: (opt_trt_fp16 if zone == "backbone" else opt_cudagraphs)
+            for zone in SUBZONES[family]
+        }
+        for family in SUBZONES
+    }
+
+
 def get_subzone(model: nn.Module, family: str, name: str) -> Tuple[nn.Module, Callable]:
     """Retourne (sous_module, setter) pour une sous-zone nommée (granularité fine)."""
     if family == "torchvision":

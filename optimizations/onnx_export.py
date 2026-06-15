@@ -119,7 +119,7 @@ def export_backbone_only(
         _simplify(output_path)
 
     size_mb = Path(output_path).stat().st_size / 1e6
-    print(f"[ONNX] backbone exporté → {output_path}  ({size_mb:.1f} MB)")
+    print(f"[ONNX] backbone exporté -> {output_path}  ({size_mb:.1f} MB)")
     print(f"  outputs : {output_names}")
     return output_path
 
@@ -175,7 +175,7 @@ def export_full_detection(
         _simplify(output_path)
 
     size_mb = Path(output_path).stat().st_size / 1e6
-    print(f"[ONNX] modèle complet exporté → {output_path}  ({size_mb:.1f} MB)")
+    print(f"[ONNX] modèle complet exporté -> {output_path}  ({size_mb:.1f} MB)")
     return output_path
 
 
@@ -205,10 +205,10 @@ def check_onnx(onnx_path: str) -> bool:
     m = onnx.load(onnx_path)
     try:
         onnx.checker.check_model(m)
-        print(f"[ONNX] ✓ Validation OK — {onnx_path}")
+        print(f"[ONNX] [OK] Validation OK — {onnx_path}")
         return True
     except onnx.checker.ValidationError as e:
-        print(f"[ONNX] ✗ Validation FAILED — {e}")
+        print(f"[ONNX] [X] Validation FAILED — {e}")
         return False
 
 
@@ -259,7 +259,7 @@ def _simplify(path: str) -> None:
         m, ok = onnxsim.simplify(onnx.load(path))
         if ok:
             onnx.save(m, path)
-            print("[ONNX] Graphe simplifié avec onnxsim ✓")
+            print("[ONNX] Graphe simplifié avec onnxsim [OK]")
         else:
             print("[ONNX] onnxsim n'a pas pu simplifier le graphe")
     except ImportError:

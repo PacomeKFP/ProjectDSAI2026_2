@@ -228,9 +228,9 @@ def print_nsys_command(
         f"        --n-active {n_active} \\\n"
         f"        --device {device}"
     )
-    print("\n── Commande Nsight Systems ─────────────────────────────────")
+    print("\n-- Commande Nsight Systems -----------------------------------")
     print(cmd)
-    print("────────────────────────────────────────────────────────────\n")
+    print("--------------------------------------------------------------\n")
     return cmd
 
 
