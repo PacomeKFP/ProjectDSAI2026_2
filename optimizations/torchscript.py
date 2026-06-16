@@ -95,8 +95,12 @@ def optimize_with_torchscript(
         ts_model = _try_trace(model, example_input)
 
     if ts_model is None:
-        print("[TorchScript] [X] Compilation impossible — retour du modèle original.")
-        return model
+        # FAIL-LOUD : ne pas retomber silencieusement sur l'eager — sinon le runner
+        # rapporterait un faux gain (le bench mesurerait le modèle non-compilé alors
+        # qu'il croit mesurer TorchScript). Le try/except du runner marquera FAILED.
+        raise RuntimeError(
+            "TorchScript : ni script ni trace n'ont abouti — compilation impossible."
+        )
 
     # ── 2. Freeze ─────────────────────────────────────────────────────────────
     if freeze:
