@@ -1,38 +1,38 @@
 """
 optimizations/tensorrt_int8.py
-═══════════════════════════════
-TensorRT INT8 avec calibration PTQ (Post-Training Quantization).
+===============================
+TensorRT INT8 with PTQ (Post-Training Quantization) calibration.
 
-Dépendances :
+Dependencies:
   torch >= 2.1
   torch-tensorrt >= 2.1    pip install torch-tensorrt
-  tensorrt >= 8.6          pre-installé sur Colab GPU
-  numpy                    pip install numpy   (inclus)
+  tensorrt >= 8.6          pre-installed on Colab GPU
+  numpy                    pip install numpy   (included)
 
-Ce que ça fait :
-  La quantification INT8 réduit les poids et activations de FP32 (32 bits)
-  à INT8 (8 bits). Gain : 4× moins de bande passante mémoire, 2-4× plus
-  rapide sur les INT8 Tensor Cores (Turing/Ampere/Hopper).
+What it does:
+  INT8 quantization reduces weights and activations from FP32 (32 bits) to
+  INT8 (8 bits). Gain: 4x less memory bandwidth, 2-4x faster on INT8 Tensor
+  Cores (Turing/Ampere/Hopper).
 
-  Protocole PTQ (Post-Training Quantization) :
-    1. Calibration : on fait tourner le modèle sur ~200-500 images COCO
-       avec un "calibrateur" qui collecte les histogrammes d'activation.
-    2. Calcul des facteurs d'échelle : par couche, TRT choisit le facteur
-       qui minimise l'erreur de quantification (méthode entropy ou percentile).
-    3. Compilation : TRT compile les couches INT8-compatibles en INT8,
-       garde en FP16 les couches sensibles (softmax, sigmoid, NMS).
+  PTQ (Post-Training Quantization) protocol:
+    1. Calibration: run the model on ~200-500 COCO images with a "calibrator"
+       that collects activation histograms.
+    2. Computing scale factors: per layer, TRT picks the factor that minimizes
+       quantization error (entropy or percentile method).
+    3. Compilation: TRT compiles INT8-compatible layers in INT8, keeps the
+       sensitive layers in FP16 (softmax, sigmoid, NMS).
 
-  Impact MAP :
-    Typiquement -0.5% à -2% vs FP32 selon le modèle et la taille du
-    dataset de calibration. À vérifier systématiquement après optimisation.
+  MAP impact:
+    Typically -0.5% to -2% vs FP32 depending on the model and the calibration
+    dataset size. Always verify after optimization.
 
-  Calibration dataset :
-    Utiliser un sous-ensemble du VAL set COCO (pas le train set pour éviter
-    le data leakage). 200-500 images suffisent.
+  Calibration dataset:
+    Use a subset of the COCO VAL set (not the train set to avoid data leakage).
+    200-500 images is enough.
 
-  ⚠ INT8 nécessite des données de calibration représentatives.
-    Des images non représentatives (mauvaise distribution des valeurs)
-    peuvent dégrader la MAP significativement.
+  [!] INT8 requires representative calibration data.
+    Non-representative images (poor value distribution) can degrade the MAP
+    significantly.
 """
 
 from __future__ import annotations
@@ -45,12 +45,12 @@ import torch
 import torch.nn as nn
 
 
-# ── Dataset de calibration ────────────────────────────────────────────────────
+# -- Calibration dataset -------------------------------------------------------
 
 class CalibrationDataset(torch.utils.data.Dataset):
     """
-    Dataset minimal pour la calibration INT8.
-    Wraps une liste de samples (dicts avec 'path') et les prétraite pour TRT.
+    Minimal dataset for INT8 calibration.
+    Wraps a list of samples (dicts with 'path') and preprocesses them for TRT.
     """
 
     def __init__(
@@ -71,7 +71,7 @@ class CalibrationDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         inp = self.preprocess(self.samples[idx])
-        # Normaliser au format [3, H, W] float32 (pas de batch dim)
+        # Normalize to [3, H, W] float32 (no batch dim)
         if inp.dim() == 4:
             inp = inp.squeeze(0)
         return inp
@@ -84,18 +84,18 @@ def build_calibration_loader(
     batch_size: int = 8,
 ) -> torch.utils.data.DataLoader:
     """
-    Crée un DataLoader pour la calibration INT8.
+    Create a DataLoader for INT8 calibration.
 
     Parameters
     ----------
-    samples       : liste de dicts {'path', 'image_id', ...}
-    preprocess_fn : fonction de prétraitement du modèle (ex: r50.preprocess)
-    n_images      : nombre d'images de calibration (200-500 recommandé)
-    batch_size    : batch pour la calibration (8-16, ne pas dépasser la VRAM)
+    samples       : list of dicts {'path', 'image_id', ...}
+    preprocess_fn : model preprocessing function (e.g. r50.preprocess)
+    n_images      : number of calibration images (200-500 recommended)
+    batch_size    : batch for calibration (8-16, do not exceed VRAM)
 
     Returns
     -------
-    DataLoader prêt pour torch_tensorrt.DataLoaderCalibrator
+    DataLoader ready for torch_tensorrt.DataLoaderCalibrator
     """
     ds = CalibrationDataset(samples, preprocess_fn, collate_fn=None, n_images=n_images)
     return torch.utils.data.DataLoader(
@@ -107,7 +107,7 @@ def build_calibration_loader(
     )
 
 
-# ── Compilation INT8 ──────────────────────────────────────────────────────────
+# -- INT8 compilation ----------------------------------------------------------
 
 def build_trt_int8(
     model: nn.Module,
@@ -118,32 +118,32 @@ def build_trt_int8(
     min_block_size: int = 5,
 ) -> nn.Module:
     """
-    Compile le modèle avec TensorRT INT8 via torch_tensorrt + calibration PTQ.
+    Compile the model with TensorRT INT8 via torch_tensorrt + PTQ calibration.
 
     Parameters
     ----------
-    model               : nn.Module en mode eval
-    calibration_loader  : DataLoader de calibration (build_calibration_loader())
-    save_path           : si fourni, sauvegarde l'engine calibré (.ts)
-    workspace_gb        : taille workspace TRT en Go
-    calibration_algo    : "entropy" (recommandé) | "minmax" | "percentile"
-    min_block_size      : minimum d'ops par bloc TRT
+    model               : nn.Module in eval mode
+    calibration_loader  : calibration DataLoader (build_calibration_loader())
+    save_path           : if provided, save the calibrated engine (.ts)
+    workspace_gb        : TRT workspace size in GB
+    calibration_algo    : "entropy" (recommended) | "minmax" | "percentile"
+    min_block_size      : minimum ops per TRT block
 
     Returns
     -------
-    nn.Module avec même API que l'original.
+    nn.Module with the same API as the original.
     """
     try:
         import torch_tensorrt
         from torch_tensorrt.ptq import DataLoaderCalibrator, CalibrationAlgo
     except ImportError:
         raise ImportError(
-            "torch-tensorrt non installé.\n"
+            "torch-tensorrt not installed.\n"
             "  pip install torch-tensorrt"
         )
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA non disponible. TRT nécessite un GPU NVIDIA.")
+        raise RuntimeError("CUDA not available. TRT requires an NVIDIA GPU.")
 
     model.eval()
     workspace_bytes = int(workspace_gb * (1 << 30))
@@ -154,9 +154,9 @@ def build_trt_int8(
         "percentile": CalibrationAlgo.PERCENTILE_CALIBRATION,
     }
     if calibration_algo not in _algo_map:
-        raise ValueError(f"calibration_algo doit être parmi {list(_algo_map)}")
+        raise ValueError(f"calibration_algo must be one of {list(_algo_map)}")
 
-    print(f"[TRT INT8] Calibration en cours ({len(calibration_loader.dataset)} images)...")
+    print(f"[TRT INT8] Calibration in progress ({len(calibration_loader.dataset)} images)...")
 
     calibrator = DataLoaderCalibrator(
         calibration_loader,
@@ -179,20 +179,20 @@ def build_trt_int8(
 
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        # Forcer la compilation en faisant un premier appel
+        # Force compilation by running a first call
         sample_batch = next(iter(calibration_loader)).cuda().unsqueeze(0)
         with torch.no_grad():
             _ = trt_model([sample_batch[0]])
         torch_tensorrt.save(trt_model, save_path)
         size_mb = Path(save_path).stat().st_size / 1e6
-        print(f"[TRT INT8] Engine sauvegardé -> {save_path}  ({size_mb:.1f} MB)")
+        print(f"[TRT INT8] Engine saved -> {save_path}  ({size_mb:.1f} MB)")
 
-    print(f"[TRT INT8] Compilation INT8 prête (algo={calibration_algo}).")
-    print("  -> Vérifier la MAP après optimisation (dégradation typique : -0.5% à -2%).")
+    print(f"[TRT INT8] INT8 compilation ready (algo={calibration_algo}).")
+    print("  -> Check MAP after optimization (typical drop: -0.5% to -2%).")
     return trt_model
 
 
-# ── Analyse de la sensibilité par couche ─────────────────────────────────────
+# -- Per-layer sensitivity analysis -------------------------------------------
 
 def layer_sensitivity_report(
     model_fp16: nn.Module,
@@ -204,15 +204,15 @@ def layer_sensitivity_report(
     device: str = "cuda",
 ) -> None:
     """
-    Compare les sorties FP16 et INT8 couche par couche pour identifier
-    les couches sensibles à la quantification (grande divergence).
+    Compare FP16 and INT8 outputs layer by layer to identify layers sensitive
+    to quantization (large divergence).
 
-    Utiliser ModuleBenchmark pour le timing, cette fonction pour la précision.
+    Use ModuleBenchmark for timing, this function for accuracy.
     """
     from utils.benchmark import ModuleBenchmark
     import pandas as pd
 
-    print("[INT8 Sensitivity] Comparaison FP16 vs INT8 sur", n_samples, "images")
+    print("[INT8 Sensitivity] FP16 vs INT8 comparison on", n_samples, "images")
 
     errors = []
     for s in data[:n_samples]:
@@ -232,8 +232,8 @@ def layer_sensitivity_report(
 
     if errors:
         mean_err = np.mean(errors)
-        print(f"  Erreur moyenne boxes FP16<->INT8 : {mean_err:.4f} pixels")
+        print(f"  Mean FP16<->INT8 box error: {mean_err:.4f} pixels")
         if mean_err > 2.0:
-            print("  [!] Dégradation significative — considérer mixed precision (INT8 backbone seulement)")
+            print("  [!] Significant degradation -- consider mixed precision (INT8 backbone only)")
         else:
-            print("  [OK] Dégradation acceptable")
+            print("  [OK] Acceptable degradation")

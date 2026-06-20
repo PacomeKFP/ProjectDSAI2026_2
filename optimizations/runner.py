@@ -1,33 +1,33 @@
 """
 optimizations/runner.py
-════════════════════════
-Orchestrateur d'optimisation CONSCIENTE DE L'ARCHITECTURE.
+========================
+ARCHITECTURE-AWARE optimization orchestrator.
 
-Pour chaque modèle et chaque variante :
-  1. construit le modèle optimisé (optimisation par ZONE — voir zones.py :
-     seule la zone statique backbone/FPN est optimisée, le NMS reste en eager) ;
-  2. BENCHMARK (vitesse GPU + détail par module pour le baseline) ;
-  3. ÉVALUATION MAP@640 (uniquement variantes qui changent la précision) ;
-  4. PROFILING PyTorch avant/après (kernels, mémoire, opérations) ;
-  5. SAUVEGARDE de TOUT, sous le préfixe de sortie (Drive sur Colab).
+For each model and each variant:
+  1. build the optimized model (ZONE optimization -- see zones.py: only the
+     backbone/FPN static zone is optimized, the NMS stays in eager);
+  2. BENCHMARK (GPU speed + per-module breakdown for the baseline);
+  3. MAP@640 EVALUATION (only variants that change accuracy);
+  4. PyTorch PROFILING before/after (kernels, memory, operations);
+  5. SAVE EVERYTHING under the output prefix (Drive on Colab).
 
-Robustesse : chaque (modèle, variante) est isolé (try/except) ; un échec est
-journalisé (errors/) et n'interrompt pas la suite. results.csv est réécrit
-après chaque variante, et une sauvegarde par-modèle est faite à la fin de
-chaque modèle → tout survit à une déconnexion Colab.
+Robustness: each (model, variant) is isolated (try/except); a failure is
+logged (errors/) and does not interrupt the rest. results.csv is rewritten
+after each variant, and a per-model save is done at the end of each model
+-> everything survives a Colab disconnect.
 
-Sorties (sous <préfixe>/results/optimization/<run_id>/) :
-  run.log                         journal complet
-  results.csv / results_final.csv tableau récapitulatif (incrémental)
-  bench/<model>_<variant>.json    métriques de vitesse brutes
-  eval/<model>_<variant>.json     métriques MAP/AR COCO complètes
-  modules/<model>_<variant>.csv   timing par module feuille (ModuleBenchmark)
-  profiles/<model>_<variant>.csv  table d'opérations (kernels/mémoire) du profiler
-  errors/<model>_<variant>.txt    traceback en cas d'échec
+Outputs (under <prefix>/results/optimization/<run_id>/):
+  run.log                         full journal
+  results.csv / results_final.csv summary table (incremental)
+  bench/<model>_<variant>.json    raw speed metrics
+  eval/<model>_<variant>.json     full COCO MAP/AR metrics
+  modules/<model>_<variant>.csv   per-leaf-module timing (ModuleBenchmark)
+  profiles/<model>_<variant>.csv  profiler operation table (kernels/memory)
+  errors/<model>_<variant>.txt    traceback on failure
 
-Décision MAP@640 : la MAP réutilise le modèle optimisé avec le pipeline 640×640
-(preprocess/collate/postprocess), pour rester à shapes fixes et cohérent avec
-le benchmark. C'est le DELTA baseline→optimisé qui mesure l'impact FP16/INT8.
+MAP@640 decision: MAP reuses the optimized model with the 640x640 pipeline
+(preprocess/collate/postprocess) to stay at fixed shapes and consistent with
+the benchmark. The baseline->optimized DELTA measures the FP16/INT8 impact.
 """
 
 from __future__ import annotations
@@ -49,15 +49,15 @@ from .zones import (
 )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Configuration & specs
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 @dataclass
 class RunConfig:
     n_warmup:          int   = 50
     n_measure:         int   = 1000
-    n_profile:         int   = 150        # itérations actives du profiler
+    n_profile:         int   = 150        # active profiler iterations
     do_profile:        bool  = True
     device:            str   = "cuda"
     compile_backend:   str   = "inductor"   # "inductor" (Colab) | "cudagraphs" (Windows)
@@ -79,20 +79,20 @@ class ModelSpec:
 @dataclass
 class VariantSpec:
     name:            str
-    build:           Callable       # (model, mspec, runner) -> modèle optimisé
+    build:           Callable       # (model, mspec, runner) -> optimized model
     do_map:          bool = False
     with_modules:    bool = False
     profile:         bool = True
     requires:        Optional[str] = None   # "cuda" | "compile" | "trt" | "trt+int8"
-    eval_batch_size: Optional[int] = None   # 1 pour les modèles à shape figée (TRT)
+    eval_batch_size: Optional[int] = None   # 1 for fixed-shape models (TRT)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Builders de variantes (imports paresseux → runner importable sans torch)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Variant builders (lazy imports -> runner importable without torch)
+# ==============================================================================
 
-# Backends graphe pour _full() — un par clé, lazy-imported pour ne pas tirer
-# torch_tensorrt quand on ne fait que `none`/`compile`/etc.
+# Graph backends for _full() -- one per key, lazy-imported so we do not pull
+# torch_tensorrt when running just `none`/`compile`/etc.
 
 def _graph_noop(model, mspec, ctx):
     return model
@@ -132,12 +132,12 @@ _GRAPH_BACKENDS = {
 
 
 def _full(graph: str, fp16: bool = False):
-    """Builder MODÈLE COMPLET : autocast FP16 optionnel, puis une optim de graphe.
+    """FULL-MODEL builder: optional FP16 autocast, then one graph optimization.
 
-    graph ∈ _GRAPH_BACKENDS. Tout est appliqué au modèle entier (NMS inclus) —
-    certaines combinaisons sous-performent ou échouent (le NMS casse
-    compile/cudagraphs/TRT). compile_fp16 = _full("compile", fp16=True) était le
-    meilleur sur T4 (×2.35). dynamic=False fige les shapes (640).
+    graph  in  _GRAPH_BACKENDS. Everything is applied to the entire model (NMS
+    included) -- some combinations underperform or fail (the NMS breaks
+    compile/cudagraphs/TRT). compile_fp16 = _full("compile", fp16=True) was
+    the best on T4 (x2.35). dynamic=False freezes the shapes (640).
     """
     backend = _GRAPH_BACKENDS[graph]
     def build(model, mspec, ctx):
@@ -157,7 +157,7 @@ def _zone_ctx(ctx, calib=None) -> dict:
 
 
 def _zone_builder(optimizer):
-    """Crée un builder qui applique `optimizer` à la zone statique du modèle."""
+    """Create a builder that applies `optimizer` to the model's static zone."""
     def build(model, mspec, ctx):
         return apply_zone_optimization(
             model, mspec.family, optimizer, _zone_ctx(ctx),
@@ -179,7 +179,7 @@ def build_zone_trt_int8(model, mspec, ctx):
 
 
 def build_mixed_trt_cudagraphs(model, mspec, ctx):
-    # Plan défini dans zones.plan_mixed() — décision d'architecture.
+    # Plan defined in zones.plan_mixed() -- architecture decision.
     return apply_subzone_plan(
         model, mspec.family, plan_mixed()[mspec.family], _zone_ctx(ctx),
         device=ctx.config.device, size=ctx.config.size,
@@ -187,28 +187,28 @@ def build_mixed_trt_cudagraphs(model, mspec, ctx):
 
 
 DEFAULT_VARIANTS: List[VariantSpec] = [
-    # ── Configs VALIDÉES (speedup réel sur T4) — priorité ─────────────────────
+    # -- VALIDATED configs (real speedup on T4) -- priority ---------------------
     VariantSpec("baseline",     _full("none"),               do_map=True,  with_modules=True,  profile=True, requires=None),
     VariantSpec("fp16",         _full("none", fp16=True),    do_map=True,  with_modules=True,  profile=True, requires="cuda"),
-    VariantSpec("compile_fp16", _full("compile", fp16=True), do_map=False, with_modules=False, profile=True, requires="compile"),  # ×2.35 sur T4
-    # ── TensorRT (exigence de l'encadrant) — backbone, MAP à batch=1 ──────────
+    VariantSpec("compile_fp16", _full("compile", fp16=True), do_map=False, with_modules=False, profile=True, requires="compile"),  # x2.35 on T4
+    # -- TensorRT (advisor's requirement) -- backbone, MAP at batch=1 -----------
     VariantSpec("zone_trt_fp16",   _zone_builder(opt_trt_fp16),        do_map=True, with_modules=False, profile=True, requires="trt", eval_batch_size=1),
     VariantSpec("zone_trt_folded", _zone_builder(opt_trt_fp16_folded), do_map=True, with_modules=False, profile=True, requires="trt", eval_batch_size=1),
-    # ── Autres leviers (gain modeste sur T4, comparaison) ─────────────────────
+    # -- Other levers (modest gain on T4, for comparison) ----------------------
     VariantSpec("zone_cudagraphs",  _zone_builder(opt_cudagraphs),  do_map=False, with_modules=False, profile=True, requires="cuda"),
     VariantSpec("zone_torchscript", _zone_builder(opt_torchscript), do_map=False, with_modules=False, profile=True, requires=None),
     VariantSpec("zone_compile",     _zone_builder(opt_compile),     do_map=False, with_modules=False, profile=True, requires="compile"),
-    # ── Expérimental (« anales ») — à activer ensuite ─────────────────────────
+    # -- Experimental ("anales") -- to enable later -----------------------------
     VariantSpec("mixed_trt_bb__cudagraphs_rest", build_mixed_trt_cudagraphs, do_map=False, with_modules=False, profile=True, requires="trt"),
     VariantSpec("zone_trt_int8", build_zone_trt_int8, do_map=True, with_modules=False, profile=True, requires="trt+int8", eval_batch_size=1),
 ]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Variantes MODÈLE COMPLET (sans zones) — toutes les optims, individuelles et
-# combinées (autocast FP16). Réutilise la factory _full ci-dessus.
-# Modèles compilés/tracés/TRT : shape figée à batch=1 → MAP à batch=1.
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# FULL-MODEL variants (without zones) -- all optimizations, individual and
+# combined (FP16 autocast). Reuses the _full factory above.
+# Compiled/traced/TRT models: shape frozen at batch=1 -> MAP at batch=1.
+# ==============================================================================
 
 FULL_VARIANTS: List[VariantSpec] = [
     VariantSpec("baseline",         _full("none"),                 do_map=True,  with_modules=True,  requires=None),
@@ -223,9 +223,9 @@ FULL_VARIANTS: List[VariantSpec] = [
 ]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Implémentations réelles (imports paresseux)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+# Real implementations (lazy imports)
+# ==============================================================================
 
 def _real_benchmark_impl(model, data, preprocess, collate, n_warmup, n_measure, device, module_benchmark):
     from utils.benchmark import benchmark_model
@@ -253,20 +253,20 @@ def _real_mb_factory():
 
 
 def _free_gpu():
-    """Nettoyage AGRESSIF entre variantes — INDISPENSABLE.
+    """AGGRESSIVE cleanup between variants -- ESSENTIAL.
 
-    torch.compile / cudagraphs / TRT laissent un état GLOBAL dans le processus
-    (caches inductor, pools mémoire cudagraph, contextes TRT). Sans reset, cet
-    état pollue les variantes suivantes : le speedup se dégrade avec l'ordre
-    d'exécution et les cudagraphs finissent par se corrompre. torch.compiler.reset
-    appelle déjà torch._dynamo.reset en interne — un seul reset suffit.
+    torch.compile / cudagraphs / TRT leave GLOBAL state in the process
+    (inductor caches, cudagraph memory pools, TRT contexts). Without a reset,
+    that state pollutes the following variants: the speedup degrades with
+    execution order and cudagraphs eventually corrupt. torch.compiler.reset
+    already calls torch._dynamo.reset internally -- one reset is enough.
     """
     import gc
     try:
         import torch
         if hasattr(torch, "compiler") and hasattr(torch.compiler, "reset"):
             torch.compiler.reset()
-        else:                                       # vieux torch sans torch.compiler
+        else:                                       # old torch without torch.compiler
             import torch._dynamo as _dynamo
             _dynamo.reset()
     except Exception:
@@ -280,9 +280,9 @@ def _free_gpu():
         pass
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 # Runner
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 _RESULT_FIELDS = [
     "model", "variant", "status", "mean_ms", "std_ms", "fps", "speedup",
@@ -297,7 +297,7 @@ class OptimizationRunner:
         eval_data,
         coco_gt,
         config: RunConfig,
-        run_subdir: str,                       # ex. "results/optimization/<id>"
+        run_subdir: str,                       # e.g. "results/optimization/<id>"
         benchmark_impl: Optional[Callable] = None,
         map_impl: Optional[Callable] = None,
         profile_impl: Optional[Callable] = None,
@@ -313,7 +313,7 @@ class OptimizationRunner:
         self.profile_impl   = profile_impl or _real_profile_impl
         self.mb_factory     = module_benchmark_factory or _real_mb_factory
 
-        # Tous les sous-dossiers sont créés sous le préfixe (Drive sur Colab).
+        # All sub-folders are created under the prefix (Drive on Colab).
         self.run_dir = ensure_dir(run_subdir)
         for sub in ("errors", "modules", "profiles", "bench", "eval"):
             ensure_dir(run_subdir, sub)
@@ -323,11 +323,11 @@ class OptimizationRunner:
         self._baseline_ms: dict[str, float] = {}
 
         self.logger = self._setup_logger()
-        self.logger.info(f"Préfixe : {project_prefix() or '(local)'}")
+        self.logger.info(f"Prefix  : {project_prefix() or '(local)'}")
         self.logger.info(f"Run dir : {self.run_dir}")
         self.logger.info(f"Config  : {json.dumps(asdict(config))}")
 
-    # ── Logging ────────────────────────────────────────────────────────────────
+    # -- Logging ----------------------------------------------------------------
 
     def _setup_logger(self) -> logging.Logger:
         logger = logging.getLogger(f"optrunner.{id(self)}")
@@ -340,27 +340,27 @@ class OptimizationRunner:
         sh = logging.StreamHandler(); sh.setFormatter(fmt); logger.addHandler(sh)
         return logger
 
-    # ── Capacités ───────────────────────────────────────────────────────────────
+    # -- Capabilities -----------------------------------------------------------
 
     def _capable(self, requires: Optional[str]) -> tuple[bool, str]:
         c = self.config
         if requires is None:
             return True, ""
         if requires == "cuda":
-            return (c.device == "cuda"), "CUDA requis"
+            return (c.device == "cuda"), "CUDA required"
         if requires == "compile":
-            return (c.compile_backend != "eager"), "backend compile indisponible"
+            return (c.compile_backend != "eager"), "compile backend unavailable"
         if requires == "trt":
-            return c.trt_available, "TensorRT indisponible"
+            return c.trt_available, "TensorRT unavailable"
         if requires == "trt+int8":
             if not c.trt_available:
-                return False, "TensorRT indisponible"
+                return False, "TensorRT unavailable"
             if not c.do_int8:
-                return False, "INT8 désactivé (config.do_int8=False)"
+                return False, "INT8 disabled (config.do_int8=False)"
             return True, ""
         return True, ""
 
-    # ── Persistance ──────────────────────────────────────────────────────────────
+    # -- Persistence ------------------------------------------------------------
 
     def _record(self, **kw):
         self.results.append({f: kw.get(f, "") for f in _RESULT_FIELDS})
@@ -387,10 +387,10 @@ class OptimizationRunner:
             "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             encoding="utf-8")
 
-    # ── Exécution d'une variante ────────────────────────────────────────────────
+    # -- Run a single variant ---------------------------------------------------
 
     def run_variant(self, mspec: ModelSpec, spec: VariantSpec):
-        tag = f"{mspec.name} · {spec.name}"
+        tag = f"{mspec.name} * {spec.name}"
         ok, reason = self._capable(spec.requires)
         if not ok:
             self.logger.info(f"[SKIP]   {tag}  ({reason})")
@@ -423,13 +423,14 @@ class OptimizationRunner:
             self.logger.info(f"   bench : {mean_ms:.2f} ms | {fps:.1f} FPS"
                              + (f" | x{speedup}" if speedup else ""))
 
-            # 2. Éval MAP@640
+            # 2. MAP@640 evaluation
             ap = ap50 = ap75 = ""
             if spec.do_map and mspec.has_map:
                 self.logger.info(f"   MAP@640 ({len(self.eval_data)} images)...")
-                # postprocess_map = postprocess d'éval à 640 si le modèle en définit un
-                # (effdet : corrige le label +1 du postprocess de profiling). Sinon
-                # postprocess standard (torchvision : déjà correct pour l'éval).
+                # postprocess_map = 640-resolution eval postprocess if the model
+                # defines one (effdet: fixes the +1 label of the profiling
+                # postprocess). Otherwise the standard postprocess (torchvision:
+                # already correct for eval).
                 post = getattr(mspec.module, "postprocess_map", mspec.module.postprocess)
                 maps = self.map_impl(
                     optimized, self.eval_data, self.coco_gt,
@@ -440,9 +441,9 @@ class OptimizationRunner:
                 ap, ap50, ap75 = (round(maps[k], 4) for k in ("AP", "AP50", "AP75"))
                 self.logger.info(f"   AP={ap}  AP50={ap50}  AP75={ap75}")
             elif spec.do_map and not mspec.has_map:
-                self.logger.info("   MAP ignoree (tete non entrainee)")
+                self.logger.info("   MAP skipped (untrained head)")
 
-            # 3. Profiling (avant/après — kernels, mémoire, opérations)
+            # 3. Profiling (before/after -- kernels, memory, operations)
             profiled = ""
             if spec.profile and self.config.do_profile:
                 self.logger.info(f"   profiling ({self.config.n_profile} iters)...")
@@ -473,27 +474,27 @@ class OptimizationRunner:
             del model, optimized
             _free_gpu()
 
-    # ── Boucles ──────────────────────────────────────────────────────────────────
+    # -- Loops ------------------------------------------------------------------
 
     def run_model(self, mspec: ModelSpec, variants: Optional[List[VariantSpec]] = None):
         variants = variants or DEFAULT_VARIANTS
         self.logger.info("=" * 70)
-        self.logger.info(f"MODÈLE : {mspec.name}  (famille={mspec.family}, MAP={mspec.has_map})")
+        self.logger.info(f"MODEL: {mspec.name}  (family={mspec.family}, MAP={mspec.has_map})")
         self.logger.info("=" * 70)
         for spec in variants:
             self.run_variant(mspec, spec)
-        # Sauvegarde par-modèle (tout est déjà sous le préfixe Drive ; on fige une copie)
+        # Per-model save (everything is already under the Drive prefix; we freeze a copy)
         self._save_csv("results_final.csv")
-        self.logger.info(f"[SAVE]   {mspec.name} terminé — résultats figés dans {self.run_dir}")
+        self.logger.info(f"[SAVE]   {mspec.name} done -- results frozen in {self.run_dir}")
 
     def run_all(self, mspecs: List[ModelSpec], variants: Optional[List[VariantSpec]] = None):
         for mspec in mspecs:
             self.run_model(mspec, variants)
         self._save_csv("results_final.csv")
-        self.logger.info("TERMINÉ — %d lignes de résultats.", len(self.results))
+        self.logger.info("DONE -- %d result rows.", len(self.results))
         return self.results
 
-    # ── Agrégation ───────────────────────────────────────────────────────────────
+    # -- Aggregation ------------------------------------------------------------
 
     def to_dataframe(self):
         import pandas as pd

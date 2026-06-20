@@ -1,33 +1,33 @@
 """
 modal_test_env.py
-═════════════════
-Test d'environnement Modal : on part d'une image VIERGE (Debian slim), on
-installe Python 3.13 + tout le stack DL depuis PyPI (comme sur Colab), puis
-on vérifie que TRT, CUDA, torch.compile et tous les imports projet marchent.
+=================
+Modal environment test: starting from a VANILLA image (Debian slim), we
+install Python 3.13 + the full DL stack from PyPI (just like Colab), then
+verify that TRT, CUDA, torch.compile and every project import work.
 
-Lancer : modal run modal_test_env.py
+Launch: modal run modal_test_env.py
 """
 
 import modal
 
 app = modal.App("dsai2026-env-test")
 
-# Image vierge — on construit tout. Pip résout les versions ensemble (pas de
-# conflit numpy comme dans NGC). Numpy 2.x est laissé à pip, comme sur Colab.
+# Vanilla image -- we build everything. pip resolves the versions together (no
+# numpy conflict like in NGC). numpy 2.x is left to pip, as on Colab.
 image = (
     modal.Image.debian_slim(python_version="3.13")
     .pip_install(
-        # PyTorch CUDA bundled (les wheels PyPI torch incluent libcudart etc.)
+        # PyTorch CUDA bundled (PyPI torch wheels include libcudart etc.)
         "torch", "torchvision",
-        # TensorRT stack — pip résout en cohérence avec torch
+        # TensorRT stack -- pip resolves consistently with torch
         "tensorrt", "torch-tensorrt",
-        # Détection
+        # Detection
         "effdet", "timm",
-        # Données / éval
+        # Data / eval
         "pycocotools", "opencv-python-headless", "pillow",
-        # Utilitaires
+        # Utilities
         "pandas", "numpy", "psutil", "tqdm",
-        # Profilage
+        # Profiling
         "tensorboard", "nvtx",
         # ONNX
         "onnx", "onnxruntime-gpu", "onnxsim",
@@ -42,11 +42,11 @@ def test_env():
     print(f"Python      : {sys.version.split()[0]}  ({platform.platform()})")
     print("=" * 70)
 
-    # Versions des paquets critiques
+    # Versions of critical packages
     pkgs = ["numpy", "torch", "torchvision", "tensorrt", "torch_tensorrt",
             "cv2", "pycocotools", "PIL", "pandas", "tqdm",
             "effdet", "timm", "onnx", "onnxruntime", "onnxsim"]
-    print("\n── Versions des paquets ─────────────────────────────────────────")
+    print("\n-- Package versions --------------------------------------------")
     for name in pkgs:
         try:
             m = __import__(name)
@@ -55,8 +55,8 @@ def test_env():
         except Exception as e:
             print(f"  {name:18s} FAIL  ({type(e).__name__}: {str(e)[:80]})")
 
-    # CUDA et GPU
-    print("\n── GPU / CUDA ───────────────────────────────────────────────────")
+    # CUDA and GPU
+    print("\n-- GPU / CUDA ---------------------------------------------------")
     import torch
     print(f"  CUDA available    : {torch.cuda.is_available()}")
     if torch.cuda.is_available():
@@ -65,20 +65,20 @@ def test_env():
         print(f"  VRAM              : {torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB")
         print(f"  torch CUDA version: {torch.version.cuda}")
     else:
-        print("  ⚠ Pas de CUDA — test interrompu.")
+        print("  [!] No CUDA -- test aborted.")
         return {"status": "NO_CUDA"}
 
-    # Test matmul GPU
-    print("\n── Test matmul GPU ──────────────────────────────────────────────")
+    # GPU matmul test
+    print("\n-- GPU matmul test ----------------------------------------------")
     a = torch.randn(2000, 2000, device="cuda")
     b = torch.randn(2000, 2000, device="cuda")
     c = a @ b
     torch.cuda.synchronize()
-    print(f"  Résultat  : shape={tuple(c.shape)}, device={c.device}, "
+    print(f"  Result    : shape={tuple(c.shape)}, device={c.device}, "
           f"mean={c.abs().mean().item():.3f}")
 
-    # Test torch.compile (inductor)
-    print("\n── Test torch.compile (inductor) ────────────────────────────────")
+    # torch.compile test (inductor)
+    print("\n-- torch.compile test (inductor) --------------------------------")
     try:
         model = torch.nn.Sequential(
             torch.nn.Conv2d(3, 64, 3, padding=1),
@@ -96,8 +96,8 @@ def test_env():
     except Exception as e:
         print(f"  torch.compile FAIL : {type(e).__name__}: {str(e)[:200]}")
 
-    # Test TensorRT FP16
-    print("\n── Test TensorRT FP16 (torch_tensorrt) ──────────────────────────")
+    # TensorRT FP16 test
+    print("\n-- TensorRT FP16 test (torch_tensorrt) --------------------------")
     try:
         import torch_tensorrt
         model = torch.nn.Sequential(
@@ -120,20 +120,20 @@ def test_env():
     except Exception as e:
         print(f"  TRT compile FAIL : {type(e).__name__}: {str(e)[:300]}")
 
-    # Test torchvision detection (R50)
-    print("\n── Test torchvision detection ───────────────────────────────────")
+    # torchvision detection test (R50)
+    print("\n-- torchvision detection test -----------------------------------")
     try:
         from torchvision.models.detection import retinanet_resnet50_fpn_v2
         m = retinanet_resnet50_fpn_v2(weights=None, num_classes=91).cuda().eval()
         x = [torch.randn(3, 640, 640, device="cuda")]
         with torch.no_grad():
             out = m(x)
-        print(f"  RetinaNet R50 OK : {len(out)} sortie, keys={list(out[0].keys())}")
+        print(f"  RetinaNet R50 OK : {len(out)} output, keys={list(out[0].keys())}")
     except Exception as e:
         print(f"  RetinaNet R50 FAIL : {type(e).__name__}: {str(e)[:200]}")
 
-    # Test effdet
-    print("\n── Test effdet ──────────────────────────────────────────────────")
+    # effdet test
+    print("\n-- effdet test --------------------------------------------------")
     try:
         from effdet import create_model
         m = create_model("tf_efficientdet_d0", pretrained=False, num_classes=90,
@@ -146,13 +146,13 @@ def test_env():
         print(f"  effdet D0 FAIL   : {type(e).__name__}: {str(e)[:200]}")
 
     print("\n" + "=" * 70)
-    print("  TEST TERMINÉ")
+    print("  TEST COMPLETE")
     print("=" * 70)
     return {"status": "OK"}
 
 
 @app.local_entrypoint()
 def main():
-    print("Lancement du test environnement Modal (image vierge Python 3.13)...")
+    print("Running the Modal environment test (vanilla Python 3.13 image)...")
     result = test_env.remote()
-    print(f"\nRésultat : {result}")
+    print(f"\nResult: {result}")

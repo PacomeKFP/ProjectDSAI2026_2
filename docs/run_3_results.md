@@ -1,577 +1,575 @@
-# Run #3 — Modal T4 16 GB, 3 modèles × 13 variantes
+# Run #3 -- Modal T4 16 GB, 3 models x 13 variants
 
-> **Run ID** : `20260616_122931`
+> **Run ID**: `20260616_122931`
 >
-> **Artefacts** : [`outputs/20260616_122931/`](../results/20260616_122931) -- dispobible chez @PacomeKFP
+> **Artifacts**: [`outputs/20260616_122931/`](../results/20260616_122931) -- available from @PacomeKFP
 >
-> **Référence des choix** : [`docs/runs_modal.md`](runs_modal.md)
+> **Choice rationale**: [`docs/runs_modal.md`](runs_modal.md)
 >
-> **Auteur des notes** : PacomeKFP
+> **Notes author**: PacomeKFP
 >
-> **Date du run** : 16 juin 2026
+> **Run date**: 16 June 2026
 
 
-Ce document a deux objectifs : 
-(1) servir de **support pédagogique** pour qu'on
-puisse, plus tard, retrouver pourquoi telle variante donne tel chiffre, et
-(2) répondre point par point aux **trois attentes de l'encadrant** (mail du
-16 juin) — TRT au niveau sous-module, extraction des opérations rapides, et
-ouverture vers la suite.
+This document has two goals:
+(1) serve as a **learning support** so that later we can recover why a given
+variant produces a given number, and
+(2) answer point by point the **three expectations of the advisor** (email
+of 16 June) -- TRT at the sub-module level, extracting the fastest
+operations, and an opening toward the next steps.
 
-Lecture conseillée : lire dans l'ordre. Les chiffres n'ont de sens qu'avec la
-définition exacte de la variante qui les produit.
+Reading advice: read in order. The numbers only make sense together with
+the precise definition of the variant that produces them.
 
 ---
 
-## 1. Préambule — ce qu'on cherche à mesurer
+## 1. Preamble -- what we are trying to measure
 
-On a trois modèles de détection issus de familles différentes :
+We have three detection models from different families:
 
-- **RetinaNet R50** — `torchvision`, ResNet-50 + FPN + heads classification/régression dense, NMS classique
-- **FCOS R50** — `torchvision`, anchor-free, ResNet-50 + FPN, *centerness* head, NMS
-- **EfficientDet D4** — `effdet` (Ross Wightman), EfficientNet-B4 + BiFPN + heads
+- **RetinaNet R50** -- `torchvision`, ResNet-50 + FPN + dense
+  classification/regression heads, classic NMS
+- **FCOS R50** -- `torchvision`, anchor-free, ResNet-50 + FPN, *centerness*
+  head, NMS
+- **EfficientDet D4** -- `effdet` (Ross Wightman), EfficientNet-B4 + BiFPN
+  + heads
 
-Pour chacun on benchmarke un **baseline FP32** puis une série de variantes
-d'optimisation. À chaque fois on mesure : **temps moyen par image** (ms),
-**FPS**, **AP COCO** (sur 2000 images de val2017) et — pour les baselines et
-fp16 — le profil sous-module et opération.
+For each one we benchmark a **FP32 baseline** then a series of optimization
+variants. Every time we measure: **mean time per image** (ms), **FPS**,
+**COCO AP** (on 2000 val2017 images) and -- for the baselines and fp16 -- the
+per-submodule and per-operation profile.
 
-Trois questions qui structurent la suite :
+Three questions structure what follows:
 
-1. **Quel levier domine sur chaque architecture ?** (réponse : pas la même
-   selon le modèle — voir §4)
-2. **TensorRT tient-il ses promesses au niveau opération ?** (réponse :
-   oui sur EfficientDet, partiellement sur torchvision — voir §5)
-3. **Quelles briques élémentaires sont les plus accélérables ?**
-   (Conv+BN+activation, depthwise, addition pointwise — voir §6)
+1. **Which lever dominates on each architecture?** (answer: it depends on
+   the model -- see Sec.4)
+2. **Does TensorRT deliver at the operation level?** (answer: yes on
+   EfficientDet, partially on torchvision -- see Sec.5)
+3. **Which elementary building blocks are the most accelerable?**
+   (Conv+BN+activation, depthwise, pointwise add -- see Sec.6)
 
 ---
 
-## 2. Glossaire des variantes — ce que chaque tag *fait réellement*
+## 2. Variant glossary -- what each tag *actually does*
 
-Cette section répond à la demande « précise la constitution de chaque tag ».
-Pour chaque variante on donne **(a)** ce qu'elle fait en pratique, **(b)** la
-motivation théorique, et **(c)** le cas où elle est censée briller.
+This section addresses the request "describe what each tag is made of".
+For each variant we give **(a)** what it does in practice, **(b)** the
+theoretical motivation, and **(c)** the situation where it is supposed to
+shine.
 
 ### `baseline`
-- **Quoi** : modèle FP32 chargé tel quel, en mode `eval()`, exécuté avec
-  `torch.no_grad()`. Aucune compilation, aucune fusion explicite, aucune
-  conversion de précision. cuDNN choisit ses kernels en autotune au premier
-  forward (warmup de 50 itérations avant la mesure).
-- **Pourquoi** : c'est la référence. Tout speedup est mesuré par rapport à
-  ce point. C'est aussi ce qu'on obtient si on déploie « bêtement » un modèle
-  exporté de PyTorch sans toucher au runtime.
-- **Quand ça brille** : jamais — c'est la cible à battre.
+- **What**: FP32 model loaded as-is, in `eval()` mode, executed with
+  `torch.no_grad()`. No compilation, no explicit fusion, no precision
+  conversion. cuDNN autotunes its kernels at the first forward (50 warmup
+  iterations before the measurement).
+- **Why**: this is the reference. Every speedup is measured against this
+  point. It is also what you get when you "naively" deploy a PyTorch model
+  without touching the runtime.
+- **When it shines**: never -- it is the target to beat.
 
-### `fp16` (autocast pur)
-- **Quoi** : enveloppe le forward dans `torch.autocast(device_type="cuda",
-  dtype=torch.float16)`. Aucun graphe, aucune fusion. PyTorch insère
-  dynamiquement des casts FP32↔FP16 autour de chaque opération.
-- **Pourquoi** : les Tensor Cores du T4 (architecture Turing, capability 7.5)
-  exécutent les mat-muls FP16 ~2× plus vite que FP32. L'autocast est censé
-  capter ce gain sans changer le code.
-- **Quand ça brille** : sur les modèles très *compute-bound* avec de gros
-  GEMM (gros backbones, batch large). **Quand le modèle est petit et*
-  *memory-bound, les casts coûtent plus que ce qu'ils font gagner**.
+### `fp16` (pure autocast)
+- **What**: wraps the forward in `torch.autocast(device_type="cuda",
+  dtype=torch.float16)`. No graph, no fusion. PyTorch dynamically inserts
+  FP32<->FP16 casts around every operation.
+- **Why**: T4 Tensor Cores (Turing architecture, capability 7.5) execute
+  FP16 matmuls ~2x faster than FP32. Autocast is meant to capture that gain
+  without changing the code.
+- **When it shines**: on heavily *compute-bound* models with large GEMMs
+  (large backbones, large batch). **When the model is small and
+  memory-bound, the casts cost more than they save**.
 
 ### `torchscript`
-- **Quoi** : trois étapes successives.
-  1. `torch.jit.script(model)` — analyse le code Python source et produit un
-     graphe statique. Si script échoue (modèle non-scriptable), fallback en
-     `torch.jit.trace` avec un input exemple.
-  2. `torch.jit.freeze` — inline les poids comme constantes, supprime les
-     attributs inutiles, ouvre la porte au constant folding.
-  3. `torch.jit.optimize_for_inference` — passes spécifiques inférence :
-     **fusion Conv+BatchNorm** (les stats BN figées sont repliées dans les
-     poids de la conv → une couche au lieu de deux), fusion Conv+ReLU via le
-     fuser NNC, élimination de code mort.
-- **Pourquoi** : récupérer les fusions « faciles » sans dépendre de Triton
-  (contrairement à `torch.compile`) ni de TRT. Marche partout, y compris
-  sur Windows.
-- **Quand ça brille** : sur les architectures avec **beaucoup de blocs
-  Conv→BN→Activation séquentiels** (typiquement les EfficientNet/BiFPN avec
-  leurs SiLU et depthwise convs). Sur les torchvision pures (RetinaNet/FCOS),
-  le gain est modeste car une partie du graphe est en code Python dynamique.
+- **What**: three successive steps.
+  1. `torch.jit.script(model)` -- analyzes the Python source code and
+     produces a static graph. If script fails (non-scriptable model),
+     fall back to `torch.jit.trace` with a sample input.
+  2. `torch.jit.freeze` -- inlines weights as constants, removes useless
+     attributes, opens the door to constant folding.
+  3. `torch.jit.optimize_for_inference` -- inference-specific passes:
+     **Conv+BatchNorm fusion** (the frozen BN stats are folded into the
+     conv weights -> one layer instead of two), Conv+ReLU fusion via the
+     NNC fuser, dead-code elimination.
+- **Why**: get the "easy" fusions without depending on Triton (unlike
+  `torch.compile`) or on TRT. Works everywhere, including on Windows.
+- **When it shines**: on architectures with **many sequential
+  Conv->BN->Activation blocks** (typically EfficientNet/BiFPN with their SiLU
+  and depthwise convs). On pure torchvision (RetinaNet/FCOS), the gain is
+  modest because part of the graph lives in dynamic Python code.
 
 ### `compile`
-- **Quoi** : `torch.compile(model, backend="inductor", mode="default",
-  dynamic=False)`. *Inductor* est le compilateur PyTorch 2 : il prend le
-  graphe FX capturé par TorchDynamo et génère du code Triton (kernels CUDA
-  spécialisés) avec fusion agressive d'opérations pointwise et de réductions.
-- **Pourquoi** : compilation moderne, gains importants sur les modèles
-  réguliers. `dynamic=False` car nos shapes sont fixées à 640×640.
-- **Quand ça brille** : seul, **rarement** — sur les détecteurs il subit des
-  recompilations en boucle à cause du NMS dynamique (décodage qui produit
-  un nombre variable de boîtes par image). En combinaison FP16, c'est
-  une autre histoire (voir `compile_fp16`).
+- **What**: `torch.compile(model, backend="inductor", mode="default",
+  dynamic=False)`. *Inductor* is the PyTorch 2 compiler: it takes the FX
+  graph captured by TorchDynamo and generates Triton code (specialized CUDA
+  kernels) with aggressive fusion of pointwise operations and reductions.
+- **Why**: modern compilation, big gains on regular models. `dynamic=False`
+  because our shapes are fixed at 640x640.
+- **When it shines**: alone, **rarely** -- on detectors it suffers from
+  recompile loops caused by the dynamic NMS (decoding produces a variable
+  number of boxes per image). Combined with FP16 it is a different story
+  (see `compile_fp16`).
 
 ### `cudagraphs`
-- **Quoi** : `torch.compile(model, backend="cudagraphs")`. CUDA Graphs
-  enregistre une séquence de lancements de kernels comme un objet unique
-  qu'on peut « rejouer » en un seul appel API → suppression du *kernel
-  launch overhead* (typiquement ~5-10 µs par kernel × des centaines de
-  kernels = potentiel important sur les petits modèles).
-- **Pourquoi** : sur GPU rapide, le coût du lancement Python+CUDA peut
-  dominer le temps de calcul effectif pour les petits kernels.
-- **Quand ça brille** : **architectures à shapes complètement statiques**.
-  Sur les détecteurs, FCOS et RetinaNet utilisent des tenseurs CPU dans
-  `anchor_generator.set_cell_anchors` et `_batched_nms_coordinate_trick`,
-  ce qui **casse la capture** (cudagraphs refuse les tenseurs CPU).
-  Voir §4 pour les régressions désastreuses.
+- **What**: `torch.compile(model, backend="cudagraphs")`. CUDA Graphs
+  records a sequence of kernel launches as a single object that can be
+  "replayed" in a single API call -> removes the *kernel launch overhead*
+  (typically ~5-10 us per kernel x hundreds of kernels = significant
+  potential on small models).
+- **Why**: on a fast GPU, the Python+CUDA launch cost can dominate the
+  actual compute time on small kernels.
+- **When it shines**: **architectures with fully static shapes**. On
+  detectors, FCOS and RetinaNet use CPU tensors inside
+  `anchor_generator.set_cell_anchors` and
+  `_batched_nms_coordinate_trick`, which **breaks the capture**
+  (cudagraphs refuses CPU tensors). See Sec.4 for the disastrous regressions.
 
 ### `compile_fp16`, `cudagraphs_fp16`, `torchscript_fp16`
-- **Quoi** : autocast FP16 + une des trois compilations ci-dessus. L'ordre :
-  on entre dans `torch.autocast`, puis le forward compilé s'exécute en FP16.
-- **Pourquoi** : combiner *gain Tensor Cores* + *gain fusion/compilation*.
-  La combinaison est presque toujours meilleure que chaque ingrédient seul.
-- **Quand ça brille** : `compile_fp16` est **le winner historique du modèle
-  complet** sur les torchvision. Idem ici (×2.13 FCOS, ×2.29 RetinaNet).
+- **What**: FP16 autocast + one of the three compilations above. The order:
+  we enter `torch.autocast`, then the compiled forward runs in FP16.
+- **Why**: combine *Tensor Cores gain* + *fusion/compilation gain*. The
+  combination is almost always better than any ingredient alone.
+- **When it shines**: `compile_fp16` is **the historical full-model
+  winner** on torchvision. Same here (x2.13 FCOS, x2.29 RetinaNet).
 
-### `trt_fp16` (modèle complet)
-- **Quoi** : `torch_tensorrt.compile(model,
-  enabled_precisions={torch.float16})` sur le modèle complet. Sous le capot
-  TRT-Dynamo : capture du graphe via Dynamo → partitionnement en sous-graphes
-  TRT-compatibles vs eager → compilation des sous-graphes en moteurs TRT (qui
-  contiennent les kernels CUDA natifs avec fusion Conv+BN+activation,
-  sélection de tactiques optimales par benchmark interne, kernel cache).
-- **Pourquoi** : c'est l'optimisation la plus puissante théoriquement —
-  TRT recompile en kernels natifs spécialisés pour le GPU cible, alors que
-  TorchScript reste dans le runtime PyTorch.
-- **Quand ça brille** : sur **modèles à shapes purement statiques**. Sur
-  RetinaNet/FCOS, **le NMS produit un nombre variable de détections** →
-  shapes dynamiques avec borne supérieure non bornée (`Infinity`) → bug
-  sympy → crash de la compilation TRT (voir §3.2).
+### `trt_fp16` (full model)
+- **What**: `torch_tensorrt.compile(model,
+  enabled_precisions={torch.float16})` on the full model. Under the hood
+  TRT-Dynamo: graph capture via Dynamo -> partitioning into TRT-compatible
+  vs eager sub-graphs -> compilation of the sub-graphs into TRT engines
+  (which contain native CUDA kernels with Conv+BN+activation fusion,
+  optimal tactic selection via internal benchmarking, kernel cache).
+- **Why**: this is theoretically the most powerful optimization -- TRT
+  recompiles into native kernels specialized for the target GPU, whereas
+  TorchScript stays in the PyTorch runtime.
+- **When it shines**: on **models with purely static shapes**. On
+  RetinaNet/FCOS, **the NMS produces a variable number of detections** ->
+  dynamic shapes with an unbounded upper bound (`Infinity`) -> sympy bug ->
+  TRT compilation crash (see Sec.3.2).
 
 ### `zone_torchscript`, `zone_compile`, `zone_cudagraphs`, `zone_trt_fp16`
-- **Quoi** : on isole une **zone statique** du modèle (typiquement
-  backbone+FPN, parfois heads), on la passe par la compilation, et on laisse
-  le post-traitement (NMS) en eager. Pour `zone_trt_fp16` c'est précisément
-  ce que TRT demande : un sous-graphe à shapes fixes.
-- **Pourquoi** : contourner le problème des shapes dynamiques du NMS, tout
-  en récupérant le gain sur les ~80-90% du temps qui se passent dans le
-  backbone et la tête de classification.
-- **Quand ça brille** : c'est *la* voie TRT propre que l'encadrant demande
-  — pas de plantage, AP parfaitement conservée, gain net.
+- **What**: we isolate a **static zone** of the model (typically
+  backbone+FPN, sometimes the heads), compile it, and leave the
+  post-processing (NMS) in eager. For `zone_trt_fp16` this is exactly what
+  TRT asks for: a fixed-shape sub-graph.
+- **Why**: bypass the dynamic-shape NMS problem while capturing the gain
+  on the ~80-90% of time spent in the backbone and the classification head.
+- **When it shines**: it is *the* clean TRT path that the advisor requires
+  -- no crash, AP preserved exactly, real gain.
 
 ### `zone_trt_folded`
-- **Quoi** : avant TRT, on applique `torch.jit.freeze` pour propager les
-  constantes (poids gelés → les multiplications par les coefficients du
-  BiFPN deviennent des additions pondérées avec coefficients pré-calculés).
-  Puis on passe à TRT.
-- **Pourquoi** : TRT le demandait explicitement dans les logs du Run #1 —
-  « *consider constant fold the model first* ». La fusion pondérée du
-  BiFPN d'EfficientDet et certains patterns FPN+heads sont des cibles
-  typiques.
-- **Quand ça brille** : sur les architectures qui font des combinaisons
-  pondérées de feature maps (BiFPN). Surprise du run : ça brille aussi sur
-  **RetinaNet et FCOS** (×1.66 et ×1.93), preuve que le constant folding
-  débloque autre chose que le BiFPN.
+- **What**: before TRT, we apply `torch.jit.freeze` to propagate the
+  constants (frozen weights -> the multiplications by the BiFPN coefficients
+  become weighted additions with pre-computed coefficients). Then we go
+  through TRT.
+- **Why**: TRT explicitly asked for it in the Run #1 logs -- "*consider
+  constant fold the model first*". The weighted fusion of EfficientDet's
+  BiFPN and some FPN+heads patterns are typical targets.
+- **When it shines**: on architectures that perform weighted combinations
+  of feature maps (BiFPN). Run surprise: it also shines on **RetinaNet
+  and FCOS** (x1.66 and x1.93), proof that constant folding unlocks more
+  than just the BiFPN.
 
 ### `mixed_trt_bb__cudagraphs_rest`
-- **Quoi** : TRT sur le backbone uniquement + cudagraphs sur le reste
-  (FPN+heads). L'idée est d'utiliser TRT là où il excelle (convolutions
-  régulières) et cudagraphs là où l'overhead de lancement domine (les
-  centaines de petits kernels des heads).
-- **Pourquoi** : combiner les forces. Mais les transitions entre régions
-  optimisées coûtent (copies de buffers, synchronisations).
-- **Quand ça brille** : potentiellement quand TRT seul n'arrive pas à
-  compiler tout, et que cudagraphs marche sur la suite. En pratique ici,
-  comparable à TRT seul (cf. §4).
+- **What**: TRT on the backbone only + cudagraphs on the rest
+  (FPN+heads). The idea is to use TRT where it excels (regular
+  convolutions) and cudagraphs where the launch overhead dominates (the
+  hundreds of small kernels in the heads).
+- **Why**: combine the strengths. But the transitions between optimized
+  regions cost something (buffer copies, synchronizations).
+- **When it shines**: potentially when TRT alone cannot compile
+  everything, and cudagraphs works on the rest. In practice here,
+  comparable to TRT alone (cf. Sec.4).
 
-### `zone_trt_int8` — non exécuté
-- **Quoi prévu** : calibration INT8 sur 300 images, conversion des poids/
-  activations en entier 8 bits via Post-Training Quantization (PTQ).
-- **Pourquoi non exécuté** : flag `do_int8=False` dans la config du run.
-  TRT-Dynamo en INT8 demande `modelopt` (NVIDIA TensorRT-Model-Optimizer)
-  qui n'est pas installé dans l'image. À activer dans le prochain run si
-  on veut explorer cette piste.
+### `zone_trt_int8` -- not executed
+- **What was planned**: INT8 calibration on 300 images, conversion of
+  weights/activations to 8-bit integer via Post-Training Quantization (PTQ).
+- **Why not executed**: `do_int8=False` flag in the run config. TRT-Dynamo
+  in INT8 requires `modelopt` (NVIDIA TensorRT-Model-Optimizer) which is
+  not installed in the image. To enable in the next run if we want to
+  explore this lead.
 
 ---
 
-## 3. Conditions exactes du run
+## 3. Exact run conditions
 
-### 3.1. Environnement
+### 3.1. Environment
 
-- **Image Modal** : `debian_slim(python_version="3.13")` + pip install des
-  dépendances *de zéro* (comme on ferait sur Colab).
-- **Versions clés** validées par [`modal_test_env.py`](../modal_test_env.py) :
+- **Modal image**: `debian_slim(python_version="3.13")` + pip install of
+  the dependencies *from scratch* (just like on Colab).
+- **Key versions** validated by [`modal_test_env.py`](../modal_test_env.py):
   - `torch 2.8.0+cu128`
   - `torch_tensorrt 2.8.0`
   - `tensorrt 10.12.0.36`
   - `numpy 2.4.6`
   - `cv2 4.13.0`
-- **GPU** : T4 16 GB (Turing, capability 7.5, FP16 Tensor Cores, **pas** de
-  BF16 ni INT8 Tensor Cores au niveau hardware).
-- **Granularité** : 1 conteneur Modal par couple (modèle, variante) — pas de
-  pollution d'état entre variantes.
-- **Caches partagés** sur Volume Modal : `TORCH_HOME=/data/cache/torch`,
-  `HF_HOME=/data/cache/hf` → poids torchvision/effdet téléchargés une seule
-  fois et réutilisés.
+- **GPU**: T4 16 GB (Turing, capability 7.5, FP16 Tensor Cores, **no** BF16
+  or INT8 Tensor Cores at the hardware level).
+- **Granularity**: 1 Modal container per (model, variant) pair -- no
+  cross-variant state pollution.
+- **Shared caches** on the Modal Volume: `TORCH_HOME=/data/cache/torch`,
+  `HF_HOME=/data/cache/hf` -> torchvision/effdet weights downloaded once
+  and reused.
 
-### 3.2. Paramètres de bench
+### 3.2. Bench parameters
 
-| Paramètre | Valeur | Rôle |
+| Parameter | Value | Role |
 |---|---|---|
-| `N_WARMUP` | 50 | Itérations de chauffe (compile + cuDNN autotune) |
-| `N_MEASURE` | 1000 | Itérations chronométrées pour la moyenne |
-| `N_PROFILE` | 150 | Itérations sous `torch.profiler` pour les tables d'ops |
-| `N_PROFILE_DATA` | 2000 | Images pour le profilage |
-| `N_EVAL` | 2000 | Images pour la MAP COCO |
-| Image size | 640×640 | Fixe pour les 3 modèles |
+| `N_WARMUP` | 50 | Warm-up iterations (compile + cuDNN autotune) |
+| `N_MEASURE` | 1000 | Timed iterations for the mean |
+| `N_PROFILE` | 150 | Iterations under `torch.profiler` for the op tables |
+| `N_PROFILE_DATA` | 2000 | Images for profiling |
+| `N_EVAL` | 2000 | Images for the COCO MAP |
+| Image size | 640x640 | Fixed for the 3 models |
 
-### 3.3. Variantes ratées et leur cause exacte
+### 3.3. Failed variants and their exact cause
 
-Quatre variantes échouent. Les fichiers `errors/<model>_<variant>.txt` et
-les logs correspondants donnent la cause racine :
+Four variants fail. The `errors/<model>_<variant>.txt` files and the
+matching logs give the root cause:
 
-| Variante | Cause | Recommandation TRT lue dans le log |
+| Variant | Cause | TRT recommendation seen in the log |
 |---|---|---|
-| `retinanet_r50_trt_fp16` | `AttributeError: 'Infinity' object has no attribute '_mpf_'` dans `torch_tensorrt/dynamo/utils.py::extract_var_range_info` | Le NMS produit des shapes avec borne sup = `oo` (sympy infinity). TRT demande explicitement de borner les shapes dynamiques avec `torch._dynamo.mark_dynamic` ou `torch.export.Dim(min=, max=)`. |
-| `fcos_r50_trt_fp16` | Idem | Idem |
-| `retinanet_r50_torchscript_fp16` | `RuntimeError: TorchScript : ni script ni trace n'ont abouti` | L'autocast wrapper (`torch.autocast`) casse la trace : le forward devient un Python object non-scriptable. **C'est le bon comportement** : depuis le Fix #1 (Run #1), TorchScript ne retourne plus silencieusement le modèle eager — il échoue franchement. |
-| `fcos_r50_torchscript_fp16` | Idem | Idem |
+| `retinanet_r50_trt_fp16` | `AttributeError: 'Infinity' object has no attribute '_mpf_'` in `torch_tensorrt/dynamo/utils.py::extract_var_range_info` | The NMS produces shapes with upper bound = `oo` (sympy infinity). TRT explicitly asks for bounding the dynamic shapes with `torch._dynamo.mark_dynamic` or `torch.export.Dim(min=, max=)`. |
+| `fcos_r50_trt_fp16` | Same | Same |
+| `retinanet_r50_torchscript_fp16` | `RuntimeError: TorchScript: neither script nor trace succeeded` | The autocast wrapper (`torch.autocast`) breaks the trace: the forward becomes a non-scriptable Python object. **This is the right behavior**: since Fix #1 (Run #1), TorchScript no longer silently returns the eager model -- it fails loudly. |
+| `fcos_r50_torchscript_fp16` | Same | Same |
 
-Les warnings TRT les plus fréquents dans les logs des variantes TRT qui
-**ont** marché (zones, EfficientDet full) :
+The most frequent TRT warnings in the logs of the TRT variants that **did**
+work (zones, EfficientDet full):
 
 - `Both operands of the binary elementwise op index_shape_X are constant.
-  In this case, please consider constant fold the model first.` → motive
-  la variante `zone_trt_folded`.
-- `Unable to import quantization op. Please install modelopt library` →
-  bloque INT8 ; à résoudre via `pip install nvidia-modelopt` au prochain run.
-- `TensorRT-LLM is not installed` → sans impact ici, ignorable.
+  In this case, please consider constant fold the model first.` -> motivates
+  the `zone_trt_folded` variant.
+- `Unable to import quantization op. Please install modelopt library` ->
+  blocks INT8; to resolve via `pip install nvidia-modelopt` in the next
+  run.
+- `TensorRT-LLM is not installed` -> no impact here, can be ignored.
 
 ---
 
-## 4. Tableau complet des résultats
+## 4. Full results table
 
-Lecture : la colonne **xBase** est la vitesse relative au baseline du même
-modèle (>1 = plus rapide). MAP COCO sur 2000 images de val2017, n'est calculée
-que pour les variantes qui produisent encore les sorties détection compatibles
-(les variantes `zone_*` non eval sont marquées `—`).
+How to read: the **xBase** column is the speed relative to the baseline of
+the same model (>1 = faster). COCO MAP on 2000 val2017 images is only
+computed for variants that still produce compatible detection outputs (the
+non-eval `zone_*` variants are marked `--`).
 
-### 4.1. Tableau complet
+### 4.1. Full table
 
-| Modèle | Variante | ms | FPS | xBase | AP | Commentaire condensé |
+| Model | Variant | ms | FPS | xBase | AP | Condensed commentary |
 |---|---|---:|---:|---:|---:|---|
-| efficientdet_d4 | baseline | 109.17 | 9.2 | ×1.00 | 0.4477 | référence FP32 |
-| efficientdet_d4 | fp16 | 162.66 | 6.1 | **×0.67** | 0.4477 | régression : autocast seul plombe |
-| efficientdet_d4 | torchscript | 42.15 | 23.7 | ×2.59 | 0.4477 | très bon : fusion Conv+BN+SiLU paie |
-| efficientdet_d4 | **torchscript_fp16** | **30.54** | **32.7** | **×3.57** | 0.4480 | **🏆 winner global** |
-| efficientdet_d4 | cudagraphs | 58.58 | 17.1 | ×1.86 | — | OK, seul cas où cudagraphs paie |
-| efficientdet_d4 | cudagraphs_fp16 | 43.93 | 22.8 | ×2.48 | 0.4478 | bien |
-| efficientdet_d4 | trt_fp16 | 47.07 | 21.2 | ×2.32 | 0.4474 | **seul TRT full-model qui marche** |
-| efficientdet_d4 | zone_torchscript | 41.76 | 23.9 | ×2.61 | — | aussi bien que torchscript full |
-| efficientdet_d4 | zone_cudagraphs | 58.48 | 17.1 | ×1.87 | — | ≈ cudagraphs full |
-| efficientdet_d4 | zone_trt_fp16 | 47.50 | 21.1 | ×2.30 | 0.4480 | **TRT zone, AP préservée** |
-| efficientdet_d4 | mixed_trt_bb__cudagraphs_rest | 52.23 | 19.1 | ×2.09 | — | combine bien, pas mieux |
-| fcos_r50 | baseline | 50.79 | 19.7 | ×1.00 | 0.3361 | référence |
-| fcos_r50 | fp16 | 48.07 | 20.8 | ×1.06 | 0.3337 | marginal |
-| fcos_r50 | compile | 46.06 | 21.7 | ×1.10 | — | recompile NMS limite le gain |
-| fcos_r50 | **compile_fp16** | **23.87** | **41.9** | **×2.13** | 0.3336 | **🏆 winner FCOS** |
-| fcos_r50 | cudagraphs | 160.57 | 6.2 | **×0.32** | — | catastrophe (capture impossible) |
-| fcos_r50 | cudagraphs_fp16 | 174.94 | 5.7 | **×0.29** | — | idem, pire |
-| fcos_r50 | torchscript | 41.34 | 24.2 | ×1.23 | 0.3361 | bon |
-| fcos_r50 | torchscript_fp16 | — | — | — | — | FAILED (autocast ⇒ trace KO) |
-| fcos_r50 | trt_fp16 | — | — | — | — | FAILED (shapes dyn. NMS) |
-| fcos_r50 | zone_torchscript | 49.80 | 20.1 | ×1.02 | — | quasi neutre |
-| fcos_r50 | zone_compile | 54.13 | 18.5 | ×0.94 | — | régresse |
-| fcos_r50 | zone_cudagraphs | 61.19 | 16.3 | ×0.83 | — | régresse |
-| fcos_r50 | zone_trt_fp16 | 40.46 | 24.7 | ×1.26 | 0.3360 | TRT zone OK, AP conservée |
-| fcos_r50 | **zone_trt_folded** | **26.25** | **38.1** | **×1.93** | 0.3363 | **TRT propre, presque le winner** |
-| fcos_r50 | mixed_trt_bb__cudagraphs_rest | 41.83 | 23.9 | ×1.21 | — | TRT bb + cg rest |
-| retinanet_r50 | baseline | 49.75 | 20.1 | ×1.00 | 0.3775 | référence |
-| retinanet_r50 | fp16 | 35.38 | 28.3 | ×1.41 | 0.3774 | autocast paye plus que sur FCOS |
-| retinanet_r50 | compile | 53.41 | 18.7 | ×0.93 | — | recompile NMS |
-| retinanet_r50 | **compile_fp16** | **21.68** | **46.1** | **×2.29** | 0.3774 | **🏆 winner RetinaNet** |
-| retinanet_r50 | cudagraphs | 68.23 | 14.7 | ×0.73 | — | régresse |
-| retinanet_r50 | cudagraphs_fp16 | 50.60 | 19.8 | ×0.98 | 0.3774 | neutre |
-| retinanet_r50 | torchscript | 44.61 | 22.4 | ×1.12 | 0.3773 | modeste |
-| retinanet_r50 | torchscript_fp16 | — | — | — | — | FAILED (autocast ⇒ trace KO) |
-| retinanet_r50 | trt_fp16 | — | — | — | — | FAILED (shapes dyn. NMS) |
-| retinanet_r50 | zone_torchscript | 46.31 | 21.6 | ×1.07 | — | marginal |
-| retinanet_r50 | zone_compile | 53.42 | 18.7 | ×0.93 | — | régresse |
-| retinanet_r50 | zone_cudagraphs | 56.38 | 17.7 | ×0.88 | — | régresse |
-| retinanet_r50 | zone_trt_fp16 | 47.98 | 20.8 | ×1.04 | 0.3775 | TRT zone neutre |
-| retinanet_r50 | **zone_trt_folded** | **29.98** | **33.4** | **×1.66** | 0.3777 | **TRT propre RetinaNet** |
-| retinanet_r50 | mixed_trt_bb__cudagraphs_rest | 49.42 | 20.2 | ×1.01 | — | neutre |
+| efficientdet_d4 | baseline | 109.17 | 9.2 | x1.00 | 0.4477 | FP32 reference |
+| efficientdet_d4 | fp16 | 162.66 | 6.1 | **x0.67** | 0.4477 | regression: autocast alone hurts |
+| efficientdet_d4 | torchscript | 42.15 | 23.7 | x2.59 | 0.4477 | very good: Conv+BN+SiLU fusion pays off |
+| efficientdet_d4 | **torchscript_fp16** | **30.54** | **32.7** | **x3.57** | 0.4480 | ** overall winner** |
+| efficientdet_d4 | cudagraphs | 58.58 | 17.1 | x1.86 | -- | OK, only case where cudagraphs pays |
+| efficientdet_d4 | cudagraphs_fp16 | 43.93 | 22.8 | x2.48 | 0.4478 | nice |
+| efficientdet_d4 | trt_fp16 | 47.07 | 21.2 | x2.32 | 0.4474 | **only full-model TRT that works** |
+| efficientdet_d4 | zone_torchscript | 41.76 | 23.9 | x2.61 | -- | as good as full torchscript |
+| efficientdet_d4 | zone_cudagraphs | 58.48 | 17.1 | x1.87 | -- | ~= full cudagraphs |
+| efficientdet_d4 | zone_trt_fp16 | 47.50 | 21.1 | x2.30 | 0.4480 | **zone TRT, AP preserved** |
+| efficientdet_d4 | mixed_trt_bb__cudagraphs_rest | 52.23 | 19.1 | x2.09 | -- | combines well, no better |
+| fcos_r50 | baseline | 50.79 | 19.7 | x1.00 | 0.3361 | reference |
+| fcos_r50 | fp16 | 48.07 | 20.8 | x1.06 | 0.3337 | marginal |
+| fcos_r50 | compile | 46.06 | 21.7 | x1.10 | -- | NMS recompile caps the gain |
+| fcos_r50 | **compile_fp16** | **23.87** | **41.9** | **x2.13** | 0.3336 | ** FCOS winner** |
+| fcos_r50 | cudagraphs | 160.57 | 6.2 | **x0.32** | -- | disaster (capture impossible) |
+| fcos_r50 | cudagraphs_fp16 | 174.94 | 5.7 | **x0.29** | -- | same, worse |
+| fcos_r50 | torchscript | 41.34 | 24.2 | x1.23 | 0.3361 | good |
+| fcos_r50 | torchscript_fp16 | -- | -- | -- | -- | FAILED (autocast => trace KO) |
+| fcos_r50 | trt_fp16 | -- | -- | -- | -- | FAILED (dynamic NMS shapes) |
+| fcos_r50 | zone_torchscript | 49.80 | 20.1 | x1.02 | -- | nearly neutral |
+| fcos_r50 | zone_compile | 54.13 | 18.5 | x0.94 | -- | regresses |
+| fcos_r50 | zone_cudagraphs | 61.19 | 16.3 | x0.83 | -- | regresses |
+| fcos_r50 | zone_trt_fp16 | 40.46 | 24.7 | x1.26 | 0.3360 | zone TRT OK, AP preserved |
+| fcos_r50 | **zone_trt_folded** | **26.25** | **38.1** | **x1.93** | 0.3363 | **clean TRT, nearly the winner** |
+| fcos_r50 | mixed_trt_bb__cudagraphs_rest | 41.83 | 23.9 | x1.21 | -- | TRT bb + cg rest |
+| retinanet_r50 | baseline | 49.75 | 20.1 | x1.00 | 0.3775 | reference |
+| retinanet_r50 | fp16 | 35.38 | 28.3 | x1.41 | 0.3774 | autocast pays more than on FCOS |
+| retinanet_r50 | compile | 53.41 | 18.7 | x0.93 | -- | NMS recompile |
+| retinanet_r50 | **compile_fp16** | **21.68** | **46.1** | **x2.29** | 0.3774 | ** RetinaNet winner** |
+| retinanet_r50 | cudagraphs | 68.23 | 14.7 | x0.73 | -- | regresses |
+| retinanet_r50 | cudagraphs_fp16 | 50.60 | 19.8 | x0.98 | 0.3774 | neutral |
+| retinanet_r50 | torchscript | 44.61 | 22.4 | x1.12 | 0.3773 | modest |
+| retinanet_r50 | torchscript_fp16 | -- | -- | -- | -- | FAILED (autocast => trace KO) |
+| retinanet_r50 | trt_fp16 | -- | -- | -- | -- | FAILED (dynamic NMS shapes) |
+| retinanet_r50 | zone_torchscript | 46.31 | 21.6 | x1.07 | -- | marginal |
+| retinanet_r50 | zone_compile | 53.42 | 18.7 | x0.93 | -- | regresses |
+| retinanet_r50 | zone_cudagraphs | 56.38 | 17.7 | x0.88 | -- | regresses |
+| retinanet_r50 | zone_trt_fp16 | 47.98 | 20.8 | x1.04 | 0.3775 | zone TRT neutral |
+| retinanet_r50 | **zone_trt_folded** | **29.98** | **33.4** | **x1.66** | 0.3777 | **clean TRT RetinaNet** |
+| retinanet_r50 | mixed_trt_bb__cudagraphs_rest | 49.42 | 20.2 | x1.01 | -- | neutral |
 
-### 4.2. Visualisation — Pareto MAP vs FPS
+### 4.2. Visualization -- MAP vs FPS Pareto
 
-![Pareto MAP vs FPS](figures/map_vs_fps.png)
+![MAP vs FPS Pareto](figures/map_vs_fps.png)
 
-Trois bandes horizontales — une par famille — car la MAP varie très peu d'une
-variante à l'autre (au pire ~3‰ d'écart). C'est attendu : aucune des
-optimisations ici ne change la sémantique du modèle, sauf le passage en FP16
-qui peut introduire des erreurs d'arrondi marginales. **L'objectif est donc
-de pousser chaque famille le plus à droite possible sans descendre la MAP**.
+Three horizontal bands -- one per family -- because MAP varies very little
+from one variant to another (at most ~3%% apart). This is expected: none of
+the optimizations here change the model's semantics, except going to FP16,
+which can introduce marginal rounding errors. **The goal is therefore to
+push each family as far to the right as possible without dropping the MAP.**
 
-Quelques lectures :
-- **EfficientDet D4** (rouge) part de 9 FPS et atteint ~33 FPS avec
-  `torchscript_fp16` — c'est le plus gros gain absolu, mais le modèle reste
-  le plus lent des trois en valeur finale.
-- **RetinaNet R50** (bleu) atteint **46 FPS** avec `compile_fp16` —
-  championne des FPS du run, AP intacte (0.3775).
-- **FCOS R50** (vert) plafonne autour de 42 FPS (`compile_fp16`) — légère
-  baisse AP en FP16 (0.3336 vs 0.3361 baseline, soit −0.7%).
-- Les variantes **`fp16` seules** (carrés) sont parfois *à gauche* du
-  baseline — EfficientDet régresse à 6 FPS, FCOS stagne. Confirmation qu'il
-  faut **toujours combiner FP16 avec une compilation**.
+A few readings:
+- **EfficientDet D4** (red) starts at 9 FPS and reaches ~33 FPS with
+  `torchscript_fp16` -- this is the largest absolute gain, but the model
+  remains the slowest of the three in absolute final value.
+- **RetinaNet R50** (blue) reaches **46 FPS** with `compile_fp16` -- FPS
+  champion of the run, AP intact (0.3775).
+- **FCOS R50** (green) caps around 42 FPS (`compile_fp16`) -- slight AP
+  drop in FP16 (0.3336 vs 0.3361 baseline, i.e. -0.7%).
+- The **stand-alone `fp16`** variants (squares) are sometimes *to the left*
+  of the baseline -- EfficientDet regresses to 6 FPS, FCOS stays flat.
+  Confirms that FP16 must **always be combined with a compilation**.
 
-### 4.3. Speedup par variante et par famille
+### 4.3. Speedup per variant and per family
 
-![Speedup par variante](figures/speedup_par_variante.png)
+![Speedup per variant](figures/speedup_par_variante.png)
 
-Tous les speedups normalisés par le baseline de chaque modèle (ligne
-pointillée à ×1.0). Lecture rapide :
-- Les barres **hachurées** marquent une régression (vitesse plus faible que
-  le baseline). Quatre variantes régressent sur FCOS (`cudagraphs`,
-  `cudagraphs_fp16`, `zone_compile`, `zone_cudagraphs`) — c'est le modèle le
-  plus capricieux à optimiser.
-- Les **FAIL** sont en rouge vertical : `trt_fp16` et `torchscript_fp16` sur
-  les torchvision (voir §3.3 pour les causes).
-- `compile_fp16` est la barre la plus haute pour les torchvision
-  (×2.13 et ×2.29).
-- `torchscript_fp16` domine sur EfficientDet (×3.57), suivi de
-  `zone_torchscript` et `torchscript` (×2.6) — la famille TorchScript
-  est clairement la plus adaptée à cette architecture.
-- `zone_trt_folded` est le **TRT le plus propre** : il dépasse `zone_trt_fp16`
-  sur les deux torchvision (×1.93 et ×1.66 vs ×1.26 et ×1.04). Confirme que
-  le constant folding débloque réellement la compilation TRT.
+All speedups normalized by each model's baseline (dotted line at x1.0).
+Quick read:
+- **Hatched** bars mark a regression (slower than baseline). Four variants
+  regress on FCOS (`cudagraphs`, `cudagraphs_fp16`, `zone_compile`,
+  `zone_cudagraphs`) -- it is the most temperamental model to optimize.
+- **FAIL** is in vertical red: `trt_fp16` and `torchscript_fp16` on the
+  torchvision (see Sec.3.3 for the causes).
+- `compile_fp16` is the tallest bar for the torchvision (x2.13 and x2.29).
+- `torchscript_fp16` dominates on EfficientDet (x3.57), followed by
+  `zone_torchscript` and `torchscript` (x2.6) -- the TorchScript family is
+  clearly the most suited to this architecture.
+- `zone_trt_folded` is the **cleanest TRT**: it beats `zone_trt_fp16` on
+  both torchvision (x1.93 and x1.66 vs x1.26 and x1.04). Confirms that
+  constant folding really unlocks TRT compilation.
 
 ### 4.4. Winners
 
-| Modèle | Winner global | Speedup | Meilleur TRT « propre » | Speedup TRT |
+| Model | Overall winner | Speedup | Best "clean" TRT | TRT speedup |
 |---|---|---:|---|---:|
-| EfficientDet D4 | `torchscript_fp16` | ×3.57 | `zone_trt_fp16` ou `trt_fp16` | ×2.30–2.32 |
-| FCOS R50 | `compile_fp16` | ×2.13 | `zone_trt_folded` | ×1.93 |
-| RetinaNet R50 | `compile_fp16` | ×2.29 | `zone_trt_folded` | ×1.66 |
+| EfficientDet D4 | `torchscript_fp16` | x3.57 | `zone_trt_fp16` or `trt_fp16` | x2.30-2.32 |
+| FCOS R50 | `compile_fp16` | x2.13 | `zone_trt_folded` | x1.93 |
+| RetinaNet R50 | `compile_fp16` | x2.29 | `zone_trt_folded` | x1.66 |
 
-Observation transverse : **`compile_fp16` est le meilleur pour les
-torchvision**, **`torchscript_fp16` pour effdet**. Aucune variante n'est
-universellement supérieure, ce qui montre que la stratégie d'optimisation
-doit suivre la structure du modèle.
+Cross-cutting observation: **`compile_fp16` is the best for torchvision**,
+**`torchscript_fp16` for effdet**. No variant is universally superior,
+which shows that the optimization strategy must follow the model structure.
 
 ---
 
-## 5. Réponse à l'attente n°1 — TensorRT au niveau sous-module
+## 5. Answering expectation #1 -- TensorRT at the sub-module level
 
-L'encadrant demande : « *comparez le modèle avant et après accélération au
-niveau des sous-modules, et montrez clairement d'où viennent les speed-ups* ».
+The advisor asks: "*compare the model before and after acceleration at the
+sub-module level, and clearly show where the speedups come from*".
 
-On prend **EfficientDet D4** comme cas d'étude car c'est le seul modèle où
-`trt_fp16` full-model fonctionne — donc on peut comparer baseline et TRT
-sur la **même trace de profilage**.
+We take **EfficientDet D4** as the case study because it is the only model
+where full-model `trt_fp16` works -- so we can compare baseline and TRT on
+the **same profiling trace**.
 
-### 5.1. Vue globale
+### 5.1. Overall view
 
-| Mesure | Baseline | TRT FP16 | Gain |
+| Metric | Baseline | TRT FP16 | Gain |
 |---|---:|---:|---:|
-| Wall-clock moyen / image | 109.17 ms | 47.07 ms | **×2.32** |
-| `self_cuda_us` total (profil 150 itér) | 13 957 ms | 8 602 ms | **×1.62** |
-| AP COCO val2017 (2000 img) | 0.4477 | 0.4474 | −0.0003 |
+| Mean wall-clock / image | 109.17 ms | 47.07 ms | **x2.32** |
+| Total `self_cuda_us` (150-iter profile) | 13,957 ms | 8,602 ms | **x1.62** |
+| COCO val2017 AP (2000 img) | 0.4477 | 0.4474 | -0.0003 |
 
-Le wall-clock gagne plus que le CUDA pur (×2.32 vs ×1.62) : la différence
-vient de la **suppression de l'overhead Python** (le runtime TRT exécute
-le moteur en un appel C++ unique, là où PyTorch lançait des centaines de
+The wall-clock gains more than pure CUDA (x2.32 vs x1.62): the difference
+comes from **removing Python overhead** (the TRT runtime executes the
+engine in a single C++ call, where PyTorch was launching hundreds of
 kernels via Python).
 
-### 5.2. Disparition des kernels baseline (top 10 par temps économisé)
+### 5.2. Disappearing baseline kernels (top 10 by time saved)
 
-Les chiffres sont en **ms cumulés sur 150 forward passes**, métrique
-`self_cuda_us` extraite des [profils CSV](../outputs/20260616_122931/profiles).
+The numbers are in **ms cumulated over 150 forward passes**, the
+`self_cuda_us` metric extracted from the
+[CSV profiles](../outputs/20260616_122931/profiles).
 
-| Opération baseline | Baseline (ms) | TRT (ms) | Économie | Cause de la disparition |
+| Baseline operation | Baseline (ms) | TRT (ms) | Saved | Reason it disappeared |
 |---|---:|---:|---:|---|
-| `aten::cudnn_convolution` | 1 517 | 0 | **−1 517** | Remplacée par des kernels TRT spécialisés (`trt_volta_hcudnn_*`, `sm70_xmma_fprop_*`) qui intègrent Conv+BN+activation dans un seul lancement, en FP16. |
-| `aten::cudnn_batch_norm` | 989 | 0 | **−989** | **Fusion Conv+BN** : en inférence, BN est une transformation affine constante repliable dans les poids de la conv précédente. TRT fait ce folding systématiquement. |
-| `bn_fw_inf_1C11_kernel_NCHW` (cuDNN BN forward) | 989 | 0 | **−989** | Idem ci-dessus, c'est le kernel concret derrière `cudnn_batch_norm`. |
-| `aten::_conv_depthwise2d` | 960 | 0 | **−960** | Les depthwise convs (cœur d'EfficientNet) sont remplacées par des kernels TRT optimisés FP16 inclus dans `tensorrt::execute_engine`. |
-| `volta_sgemm_128x64_nn` (matmul FP32 Volta) | 930 | 0 | **−930** | Remplacé par des tactiques FP16 (`trt_volta_hcudnn_128x128_relu_*`) qui exploitent les Tensor Cores. |
-| `aten::silu_` + son kernel elementwise | 751 + 751 | 0 | **−1 502** | **Fusion conv+silu** : SiLU (Swish, `x * sigmoid(x)`) est fusionnée dans le kernel TRT précédent en tant que activation epilog. |
-| `aten::cat` (concat des features BiFPN) | 517 | 0.7 | **−516** | TRT élimine la plupart des concats en réordonnant les writes des kernels producteurs vers la zone mémoire concaténée — pas de copie séparée. |
-| `aten::mul` (broadcast pointwise) | 443 | 0 | **−443** | Fusionné dans `generatedNativePointwise` (kernel TRT généré pour des chaînes d'ops elementwise). |
+| `aten::cudnn_convolution` | 1,517 | 0 | **-1,517** | Replaced by specialized TRT kernels (`trt_volta_hcudnn_*`, `sm70_xmma_fprop_*`) that integrate Conv+BN+activation in a single launch, in FP16. |
+| `aten::cudnn_batch_norm` | 989 | 0 | **-989** | **Conv+BN fusion**: at inference, BN is a constant affine transform foldable into the preceding conv's weights. TRT does this folding systematically. |
+| `bn_fw_inf_1C11_kernel_NCHW` (cuDNN BN forward) | 989 | 0 | **-989** | Same as above, this is the concrete kernel behind `cudnn_batch_norm`. |
+| `aten::_conv_depthwise2d` | 960 | 0 | **-960** | Depthwise convs (the core of EfficientNet) are replaced by FP16-optimized TRT kernels included in `tensorrt::execute_engine`. |
+| `volta_sgemm_128x64_nn` (Volta FP32 matmul) | 930 | 0 | **-930** | Replaced by FP16 tactics (`trt_volta_hcudnn_128x128_relu_*`) that exploit Tensor Cores. |
+| `aten::silu_` + its elementwise kernel | 751 + 751 | 0 | **-1,502** | **conv+silu fusion**: SiLU (Swish, `x * sigmoid(x)`) is fused into the preceding TRT kernel as an activation epilogue. |
+| `aten::cat` (BiFPN feature concat) | 517 | 0.7 | **-516** | TRT eliminates most concats by reordering the producer kernels' writes into the concatenated memory region -- no separate copy. |
+| `aten::mul` (pointwise broadcast) | 443 | 0 | **-443** | Fused into `generatedNativePointwise` (TRT-generated kernel for chains of elementwise ops). |
 
-### 5.3. Visualisation — top 10 opérations économisées
+### 5.3. Visualization -- top 10 operations saved
 
-![Top ops économisées par TRT FP16 sur EfficientDet](figures/trt_op_savings_effdet.png)
+![Top ops saved by TRT FP16 on EfficientDet](figures/trt_op_savings_effdet.png)
 
-Les barres bleues sont les baselines FP32, les rouges sont ce qu'il **reste**
-après TRT FP16. On voit que pour la plupart des opérations dominantes du
-baseline (`cudnn_convolution`, `cudnn_batch_norm`, `_conv_depthwise2d`,
-`silu_`, `cat`), la barre rouge est **invisible** : TRT les a fait
-complètement disparaître au profit de ses propres kernels fusionnés
-(voir §5.3 ci-dessous). C'est ce qui produit le gain ×1.62 en CUDA pur.
+The blue bars are the FP32 baselines, the red ones are what **remains**
+after TRT FP16. We see that for most of the baseline's dominant operations
+(`cudnn_convolution`, `cudnn_batch_norm`, `_conv_depthwise2d`, `silu_`,
+`cat`), the red bar is **invisible**: TRT made them completely disappear
+in favor of its own fused kernels (see Sec.5.4 below). This is what produces
+the x1.62 gain in pure CUDA time.
 
-### 5.4. Ce que TRT ajoute (ops nouvelles)
+### 5.4. What TRT adds (new ops)
 
-| Op TRT | Temps (ms) | Rôle |
+| TRT op | Time (ms) | Role |
 |---|---:|---|
-| `tensorrt::execute_engine` | 3 826 | Wrapper de lancement du moteur TRT (englobe tous les kernels du sous-graphe compilé) |
-| `generatedNativePointwise` | 1 124 | Kernels CUDA générés par TRT pour des séquences pointwise fusionnées (silu, add, mul…) |
-| `trt_volta_hcudnn_128x128_relu_*` | 526 | Convolutions FP16 Volta avec ReLU/SiLU fusionnée, tactique tuile 128×128 |
-| `sm70_xmma_fprop_implicit_gemm_f32f32_f32f32_f32_*` | 222 | Convolutions implicit-GEMM SM 7.0 (Turing) |
-| `trt_volta_scudnn_128x64_relu_*` | 180 | Variante de tuile 128×64 |
-| `cuSliceLayer::naiveSlice` | 105 | Slicing des feature maps (TRT layer dédiée) |
+| `tensorrt::execute_engine` | 3,826 | TRT engine launch wrapper (covers every kernel of the compiled sub-graph) |
+| `generatedNativePointwise` | 1,124 | CUDA kernels generated by TRT for fused pointwise sequences (silu, add, mul...) |
+| `trt_volta_hcudnn_128x128_relu_*` | 526 | Volta FP16 convolutions with ReLU/SiLU fused in, 128x128 tile tactic |
+| `sm70_xmma_fprop_implicit_gemm_f32f32_f32f32_f32_*` | 222 | SM 7.0 (Turing) implicit-GEMM convolutions |
+| `trt_volta_scudnn_128x64_relu_*` | 180 | 128x64 tile variant |
+| `cuSliceLayer::naiveSlice` | 105 | Feature-map slicing (dedicated TRT layer) |
 
-**Lecture :** `tensorrt::execute_engine` (3.8 s sur 150 forwards) **remplace
-à lui seul** tous les kernels Conv/BN/Activation listés à la §5.2
-(≈ 7.7 s économisés). Le reste — `generatedNativePointwise` — absorbe les
-fusions d'opérations elementwise.
+**Reading:** `tensorrt::execute_engine` (3.8 s over 150 forwards) **alone
+replaces** every Conv/BN/Activation kernel listed in Sec.5.2 (~= 7.7 s saved).
+The rest -- `generatedNativePointwise` -- absorbs the elementwise fusions.
 
-### 5.5. Ce qui *reste bloquant*
+### 5.5. What is *still blocking*
 
-Le rapport baseline→TRT n'est que de ×1.62 en CUDA pur alors qu'on aurait
-pu espérer plus. Pourquoi ?
+The baseline->TRT ratio is only x1.62 in pure CUDA whereas we could have
+hoped for more. Why?
 
-1. **Une partie du modèle reste en eager** : le partitionneur TRT laisse en
-   PyTorch tout sous-graphe contenant des ops non supportées ou des shapes
-   dynamiques. Dans le log on voit `Both operands of the binary elementwise
-   op index_shape_X are constant. In this case, please consider constant
-   fold the model first` répété ~30× — chaque occurrence est un endroit où
-   TRT a renoncé à fuser parce que l'IR contenait des opérations sur des
-   shapes constantes non foldées. **C'est précisément ce que résout
-   `zone_trt_folded`** (mais zone_trt_folded n'est pas mesuré sur effdet
-   car effdet utilise une autre voie d'isolation).
-2. **Pas d'INT8** : sur Turing les Tensor Cores INT8 doublent encore le débit
-   par rapport à FP16. Pas activé dans ce run.
-3. **NMS reste en eager Python** — pour effdet ce n'est pas critique car la
-   tête de détection est déjà au format dense.
+1. **Part of the model stays in eager**: the TRT partitioner leaves in
+   PyTorch any sub-graph containing unsupported ops or dynamic shapes. In
+   the log we see `Both operands of the binary elementwise op
+   index_shape_X are constant. In this case, please consider constant fold
+   the model first` repeated ~30x -- each occurrence is a spot where TRT
+   gave up fusing because the IR contained operations on non-folded
+   constant shapes. **This is exactly what `zone_trt_folded` solves**
+   (but zone_trt_folded is not measured on effdet, which uses another
+   isolation path).
+2. **No INT8**: on Turing the INT8 Tensor Cores double the throughput
+   again vs FP16. Not enabled in this run.
+3. **NMS stays in eager Python** -- for effdet this is not critical because
+   the detection head is already in a dense format.
 
 ---
 
-## 6. Réponse à l'attente n°2 — opérations les plus accélérables
+## 6. Answering expectation #2 -- the most accelerable operations
 
-L'encadrant demande une **vue transversale** : quelles briques élémentaires
-deviennent les plus efficaces, indépendamment de la famille de modèle.
+The advisor asks for a **cross-cutting view**: which elementary blocks
+become the most efficient, independently of the model family.
 
-### 6.1. Méthode
+### 6.1. Method
 
-On agrège les profils de `self_cuda_us` des trois baselines (RetinaNet,
-FCOS, EfficientDet) pour identifier où va le temps. On regarde ensuite
-comment ces ops se comportent quand on applique TRT FP16 ou
-`torchscript_fp16`.
+We aggregate the `self_cuda_us` profiles of the three baselines (RetinaNet,
+FCOS, EfficientDet) to identify where the time goes. We then look at how
+these ops behave when we apply TRT FP16 or `torchscript_fp16`.
 
-### 6.2. Top des consommateurs (baselines, ms cumulés sur 3 modèles)
+### 6.2. Top consumers (baselines, ms cumulated over 3 models)
 
-| Op baseline | Total ms | Famille |
+| Baseline op | Total ms | Family |
 |---|---:|---|
-| `aten::cudnn_convolution` | 10 690 | **Convolution** — ~75% du temps total |
-| `_5x_cudnn_volta_scudnn_winograd_128x128_*` | 5 037 | Variante Winograd (conv 3×3) |
-| `volta_sgemm_128x64_nn` | 2 162 | GEMM FP32 |
-| `aten::cudnn_batch_norm` | 1 501 | **BatchNorm** |
-| `aten::add_`, `aten::mul`, elementwise variants | ~2 700 | **Pointwise** |
+| `aten::cudnn_convolution` | 10,690 | **Convolution** -- ~75% of total time |
+| `_5x_cudnn_volta_scudnn_winograd_128x128_*` | 5,037 | Winograd variant (3x3 conv) |
+| `volta_sgemm_128x64_nn` | 2,162 | FP32 GEMM |
+| `aten::cudnn_batch_norm` | 1,501 | **BatchNorm** |
+| `aten::add_`, `aten::mul`, elementwise variants | ~2,700 | **Pointwise** |
 | `aten::_conv_depthwise2d` | 960 | **Depthwise conv** (effdet only) |
 | `aten::clamp_min_` (ReLU) | 783 | **Activation** |
 
-### 6.3. Le classement « accélérable » qui répond au prof
+### 6.3. The "accelerable" ranking that answers the advisor
 
-Sur la base des transitions baseline → TRT FP16 / torchscript_fp16
-observées dans les profils :
+Based on the baseline -> TRT FP16 / torchscript_fp16 transitions observed
+in the profiles:
 
-| Brique | Speedup typique | Pourquoi elle marche bien |
+| Block | Typical speedup | Why it works well |
 |---|---|---|
-| **Conv 3×3 → BN → ReLU/SiLU séquentielles** | ×2 à ×4 | Triple fusion : (a) BN repliée dans les poids de la conv, (b) activation fusionnée comme epilog du kernel conv, (c) exécution FP16 sur Tensor Cores. **C'est la brique reine.** |
-| **Depthwise conv** | ×2 à ×3 | TRT a des tactiques FP16 spécialisées pour les depthwise (ratio compute/memory faible → bénéficie surtout des Tensor Cores). |
-| **GEMM (linear / 1×1 conv)** | ×2 (FP16) à ×4 (INT8 si activé) | Tensor Cores. |
-| **Chaînes de pointwise (mul, add, relu, sigmoid)** | ×3 à ×5 | TRT les fusionne dans un kernel unique généré → suppression du round-trip mémoire entre les ops. C'est aussi ce que fait `torch.compile`+inductor. |
-| **Concat (`aten::cat`)** | ×100 à ×∞ (élimination) | TRT élimine en réorganisant les writes des producteurs. |
+| **Sequential Conv 3x3 -> BN -> ReLU/SiLU** | x2 to x4 | Triple fusion: (a) BN folded into the conv weights, (b) activation fused as a conv-kernel epilogue, (c) FP16 execution on Tensor Cores. **This is the king block.** |
+| **Depthwise conv** | x2 to x3 | TRT has FP16-specialized tactics for depthwise (low compute/memory ratio -> mostly benefits from Tensor Cores). |
+| **GEMM (linear / 1x1 conv)** | x2 (FP16) to x4 (INT8 if enabled) | Tensor Cores. |
+| **Pointwise chains (mul, add, relu, sigmoid)** | x3 to x5 | TRT fuses them into a single generated kernel -> removes the memory round-trip between ops. This is also what `torch.compile`+inductor does. |
+| **Concat (`aten::cat`)** | x100 to xinfinity (eliminated) | TRT eliminates by reordering the producers' writes. |
 
-| Brique | Speedup faible / nul | Pourquoi |
+| Block | Low / no speedup | Why |
 |---|---|---|
-| **NMS et post-traitement détection** | ×1 (reste en eager) | Shapes dynamiques (nombre variable de boîtes), boucles Python, tenseurs CPU intermédiaires. |
-| **Anchor generation (RetinaNet/FCOS)** | régresse parfois | Utilise des tenseurs CPU → casse cudagraphs ; reste en eager même sous TRT. |
-| **Code Python explicite dans le forward** | ×1 | Ce qui n'est pas dans le graphe FX ne peut pas être compilé. |
+| **NMS and detection post-processing** | x1 (stays eager) | Dynamic shapes (variable number of boxes), Python loops, intermediate CPU tensors. |
+| **Anchor generation (RetinaNet/FCOS)** | sometimes regresses | Uses CPU tensors -> breaks cudagraphs; stays eager even under TRT. |
+| **Explicit Python code in the forward** | x1 | What is not in the FX graph cannot be compiled. |
 
-### 6.4. Briques sur lesquelles parier pour un futur design
+### 6.4. Blocks to bet on for a future design
 
-Synthèse pour la suite (cf. §8) : un réseau pensé pour être **rapide en
-production GPU** devrait privilégier :
+Synthesis for what's next (cf. Sec.8): a network designed to be **fast in GPU
+production** should favor:
 
-1. **Blocs Conv→BN→Activation** réguliers (pas de branche conditionnelle).
-2. **Activations simples et fusionnables** : ReLU, SiLU/Swish, GELU, Hardswish.
-3. **Depthwise + Pointwise** (MBConv) plutôt que des convolutions 3×3 lourdes
-   quand le compute n'est pas le goulot.
-4. **Shapes statiques** sur toute la chaîne (éviter les Top-K dynamiques,
-   les sélections par seuil, les NMS en cœur de réseau).
-5. **Pas de tenseurs CPU intermédiaires** (anchors, grids, etc. doivent être
-   pré-calculés en GPU ou registrés comme buffers).
-6. **Concat structurées** (en aval d'opérations TRT-friendly).
-
----
-
-## 7. Réponse à l'attente n°3 — ouverture vers la suite
-
-Dans de futurs travaux, on peut imaginer **construire un réseau de neurones
-de détection en assemblant directement les briques que la §6 a identifiées
-comme les plus accélérables**. Concrètement :
-
-- **Backbone** type EfficientNet ou MobileNetV3 : empilement de MBConv
-  (depthwise + pointwise + SiLU + SE-block) — chacune de ces sous-couches
-  est dans le top du tableau de §6.3.
-- **Neck** statique : un FPN simple (sans BiFPN à coefficients learnables
-  dynamiques) ou un BiFPN avec coefficients **gelés à l'inférence** pour
-  permettre le constant folding.
-- **Tête de détection dense** type FCOS ou CenterNet, avec **borne supérieure
-  fixe** sur le nombre de détections post-NMS (paddé à K = 100 par exemple)
-  pour que tout reste en shapes statiques.
-- **NMS** GPU-natif et statique (`torchvision.ops.batched_nms` avec un Top-K
-  fixe), ou intégré comme plugin TRT.
-
-Ce design garantit que **>95% du graphe soit compilable en un unique moteur
-TRT FP16**, et serait un excellent terrain pour ajouter ensuite INT8 PTQ
-(gain attendu ×1.5–2 supplémentaire sur Turing/Ampere).
+1. **Regular Conv->BN->Activation** blocks (no conditional branching).
+2. **Simple, fusable activations**: ReLU, SiLU/Swish, GELU, Hardswish.
+3. **Depthwise + Pointwise** (MBConv) rather than heavy 3x3 convolutions
+   when compute is not the bottleneck.
+4. **Static shapes** across the whole chain (avoid dynamic Top-K,
+   threshold-based selection, in-network NMS).
+5. **No intermediate CPU tensors** (anchors, grids, etc. must be
+   pre-computed on the GPU or registered as buffers).
+6. **Structured concats** (downstream of TRT-friendly operations).
 
 ---
 
-## 8. Prochaines étapes concrètes
+## 7. Answering expectation #3 -- opening toward the next steps
 
-### 8.1. Pour le rendu du 24 juin
+In future work we can imagine **building a detection neural network by
+directly assembling the blocks that Sec.6 identified as the most
+accelerable**. Concretely:
 
-- [ ] Régler `do_int8=True` et installer `nvidia-modelopt` dans l'image
-  Modal, puis relancer `zone_trt_int8` sur les 3 modèles. **Gain attendu**
-  ×1.5–2 supplémentaire par rapport à FP16.
-- [ ] Borner les shapes dynamiques des torchvision via
-  `torch._dynamo.mark_dynamic` ou `torch.export.Dim(min=1, max=300)` sur
-  la sortie du NMS, et **réessayer `trt_fp16` full-model** sur RetinaNet
-  et FCOS. C'est ce que TRT réclame explicitement dans les logs.
-- [ ] Relancer `torchscript_fp16` sur les 3 modèles avec une enveloppe
-  autocast adaptée (cast manuel des inputs en FP16 avant le trace plutôt
-  que `torch.autocast` qui casse la trace). Devrait débloquer le winner
-  sur FCOS/RetinaNet par symétrie avec EfficientDet.
+- **Backbone** EfficientNet- or MobileNetV3-style: stack of MBConv blocks
+  (depthwise + pointwise + SiLU + SE-block) -- each sub-layer is in the
+  top of the Sec.6.3 table.
+- **Static neck**: a simple FPN (without a BiFPN with dynamic learnable
+  coefficients) or a BiFPN with coefficients **frozen at inference time**
+  to allow constant folding.
+- **Dense detection head** FCOS- or CenterNet-style, with a **fixed upper
+  bound** on the number of post-NMS detections (padded to K = 100 for
+  instance) so that everything stays at static shapes.
+- **NMS** GPU-native and static (`torchvision.ops.batched_nms` with a
+  fixed Top-K), or integrated as a TRT plugin.
 
-### 8.2. Pour la présentation
-
-- Centrer le narratif autour de la **§5** (TRT au niveau sous-module sur
-  EfficientDet) — c'est la demande la plus concrète de l'encadrant.
-- Montrer le **tableau condensé §4.2** (winners) et expliquer pourquoi
-  `torchscript_fp16` domine sur effdet (BiFPN + SiLU fusionnables) tandis
-  que `compile_fp16` domine sur torchvision (gestion du NMS par Inductor
-  meilleure que TorchScript).
-- Conclure par la **§6.3** (briques accélérables) et la **§7** (design
-  futur) pour répondre au point 3 du mail.
-
-### 8.3. Pistes pour plus tard
-
-- Réécrire `FpnCombine.forward` du BiFPN pour pré-calculer
-  `relu(w)/Σw` en eval → coefficients constants → fusion possible sans
-  passer par `jit.freeze`. Rendrait `trt_fp16` propre sans astuce.
-- Étudier les profilers (CSV `profiles/`) avec un script qui extrait
-  automatiquement les opérations dont la part baisse / monte de plus
-  de X% en TRT vs baseline — automatiser §6.
-- Tester `torch.export` (le futur de Dynamo) qui résout proprement le
-  problème des shapes dynamiques avec `Dim`.
+This design guarantees that **>95% of the graph is compilable into a
+single TRT FP16 engine**, and would be excellent ground for adding INT8
+PTQ afterwards (expected additional x1.5-2 on Turing/Ampere).
 
 ---
 
-## 9. Où trouver quoi
+## 8. Concrete next steps
 
-| Question | Fichier |
+### 8.1. For the 24 June deliverable
+
+- [ ] Set `do_int8=True` and install `nvidia-modelopt` in the Modal image,
+  then rerun `zone_trt_int8` on the 3 models. **Expected gain**:
+  additional x1.5-2 vs FP16.
+- [ ] Bound the dynamic shapes of the torchvision via
+  `torch._dynamo.mark_dynamic` or `torch.export.Dim(min=1, max=300)` on
+  the NMS output, and **retry full-model `trt_fp16`** on RetinaNet and
+  FCOS. That is what TRT explicitly asks for in the logs.
+- [ ] Rerun `torchscript_fp16` on the 3 models with an adapted autocast
+  wrapper (manual FP16 cast of the inputs before tracing rather than
+  `torch.autocast`, which breaks the trace). Should unlock the winner on
+  FCOS/RetinaNet by symmetry with EfficientDet.
+
+### 8.2. For the presentation
+
+- Center the narrative around **Sec.5** (sub-module-level TRT on
+  EfficientDet) -- it is the advisor's most concrete request.
+- Show the **condensed Sec.4.2 table** (winners) and explain why
+  `torchscript_fp16` dominates on effdet (BiFPN + fusable SiLU) while
+  `compile_fp16` dominates on torchvision (Inductor's NMS handling beats
+  TorchScript).
+- Conclude with **Sec.6.3** (accelerable blocks) and **Sec.7** (future design)
+  to answer point 3 of the email.
+
+### 8.3. Leads for later
+
+- Rewrite `FpnCombine.forward` of the BiFPN to pre-compute `relu(w)/sumw`
+  at eval time -> constant coefficients -> fusion possible without going
+  through `jit.freeze`. Would make `trt_fp16` clean without the trick.
+- Study the profilers (CSVs in `profiles/`) with a script that
+  automatically extracts the operations whose share drops / increases by
+  more than X% in TRT vs baseline -- automate Sec.6.
+- Test `torch.export` (the future of Dynamo) which cleanly solves the
+  dynamic-shape problem with `Dim`.
+
+---
+
+## 9. Where to find what
+
+| Question | File |
 |---|---|
-| Tableau brut (37 lignes) | aggrégé dans la §4.1 ci-dessus depuis `outputs/20260616_122931/bench/*.json` |
-| Logs complets par variante | [`outputs/20260616_122931/logs/`](../outputs/20260616_122931/logs) |
-| Tracebacks des FAIL | [`outputs/20260616_122931/errors/`](../outputs/20260616_122931/errors) |
-| Profil sous-module (baseline et fp16) | [`outputs/20260616_122931/modules/`](../outputs/20260616_122931/modules) |
-| Profil par opération (toutes variantes) | [`outputs/20260616_122931/profiles/`](../outputs/20260616_122931/profiles) |
-| Métriques MAP COCO | [`outputs/20260616_122931/eval/`](../outputs/20260616_122931/eval) |
-| Log d'orchestration | [`outputs/20260616_122931/run.log`](../outputs/20260616_122931/run.log) |
+| Raw table (37 rows) | aggregated in Sec.4.1 above from `outputs/20260616_122931/bench/*.json` |
+| Full per-variant logs | [`outputs/20260616_122931/logs/`](../outputs/20260616_122931/logs) |
+| Tracebacks of the FAILed variants | [`outputs/20260616_122931/errors/`](../outputs/20260616_122931/errors) |
+| Sub-module profile (baseline and fp16) | [`outputs/20260616_122931/modules/`](../outputs/20260616_122931/modules) |
+| Per-operation profile (every variant) | [`outputs/20260616_122931/profiles/`](../outputs/20260616_122931/profiles) |
+| COCO MAP metrics | [`outputs/20260616_122931/eval/`](../outputs/20260616_122931/eval) |
+| Orchestration log | [`outputs/20260616_122931/run.log`](../outputs/20260616_122931/run.log) |

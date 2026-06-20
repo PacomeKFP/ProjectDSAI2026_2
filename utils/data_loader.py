@@ -1,18 +1,18 @@
 """
 data_loader.py
-──────────────
-Chargement paresseux (lazy) des données COCO.
+--------------
+Lazy loading of COCO data.
 
-Principe :
-  • Seule la liste des image_ids est conservée en mémoire au moment du sampling.
-  • Les chemins, tailles originales et pixels ne sont résolus / lus
-    qu'au moment où un élément est effectivement accédé.
-  • LazySampleList se comporte comme une liste Python ordinaire (len, [], iter, slice)
-    → aucun changement d'interface dans les modèles ou le notebook.
+Principle:
+  * Only the list of image_ids is kept in memory at sampling time.
+  * Paths, original sizes and pixels are resolved/read only when an item is
+    actually accessed.
+  * LazySampleList behaves like an ordinary Python list (len, [], iter, slice)
+    -> no interface change in the models or the notebook.
 
-Empreinte mémoire après load_*_data :
-  • Avant  : 2000 dicts pré-construits avec path + orig_size + éventuellement l'image
-  • Après  : 2000 int  (≈ 16 Ko total)
+Memory footprint after load_*_data:
+  * Before : 2000 pre-built dicts with path + orig_size + possibly the image
+  * After  : 2000 ints (~ 16 KB total)
 """
 import random
 from pathlib import Path
@@ -24,22 +24,22 @@ _N    = 2000
 _SEED = 42
 
 
-# ── Sampling ────────────────────────────────────────────────────────────────────
+# -- Sampling --------------------------------------------------------------------
 
 def _sample(ann_file, n, seed):
     coco = COCO(ann_file)
-    ids  = sorted(coco.getImgIds())          # tri déterministe
+    ids  = sorted(coco.getImgIds())          # deterministic sort
     random.seed(seed)
     return coco, random.sample(ids, min(n, len(ids)))
 
 
-# ── Helper image ────────────────────────────────────────────────────────────────
+# -- Image helper ----------------------------------------------------------------
 
 def read_rgb(sample):
     """
-    Retourne l'image sous forme de ndarray uint8 RGB.
-    Lit depuis le disque via sample['path'] (chemin résolu à la demande).
-    Accepte aussi sample['image'] si l'image est déjà chargée (rétro-compatibilité).
+    Return the image as an RGB uint8 ndarray.
+    Reads from disk via sample['path'] (path resolved on demand).
+    Also accepts sample['image'] if the image is already loaded (back-compat).
     """
     if "image" in sample:
         return sample["image"]
@@ -47,18 +47,18 @@ def read_rgb(sample):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-# ── Conteneur lazy ──────────────────────────────────────────────────────────────
+# -- Lazy container --------------------------------------------------------------
 
 class LazySampleList:
     """
-    Liste d'image_ids COCO. Un sample dict n'est construit que quand
-    on accède à l'élément ([], iter, slice).
+    List of COCO image_ids. A sample dict is only built when the corresponding
+    element is accessed ([], iter, slice).
 
-    Chaque sample dict contient :
+    Each sample dict contains:
       - 'image_id'   : int
-      - 'path'       : str  (résolu à la volée depuis l'index COCO)
+      - 'path'       : str  (resolved on the fly from the COCO index)
       - 'orig_size'  : (H, W)
-    Les pixels ne sont jamais stockés ici.
+    Pixels are never stored here.
     """
 
     def __init__(self, ids, coco, img_dir):
@@ -66,7 +66,7 @@ class LazySampleList:
         self._coco    = coco
         self._img_dir = str(img_dir)
 
-    # ── Interface list ──────────────────────────────────────────────────────────
+    # -- List interface ----------------------------------------------------------
 
     def __len__(self):
         return len(self._ids)
@@ -79,7 +79,7 @@ class LazySampleList:
             return [self._build(i) for i in self._ids[idx]]
         return self._build(self._ids[idx])
 
-    # ── Construction d'un sample dict (lookup O(1) dans l'index COCO en RAM) ───
+    # -- Build a sample dict (O(1) lookup in the in-RAM COCO index) -------------
 
     def _build(self, img_id):
         info = self._coco.loadImgs(img_id)[0]
@@ -93,12 +93,12 @@ class LazySampleList:
         return f"LazySampleList(n={len(self)}, img_dir={self._img_dir!r})"
 
 
-# ── API publique ────────────────────────────────────────────────────────────────
+# -- Public API ------------------------------------------------------------------
 
 def load_profiling_data(img_dir, ann_file, n=_N, seed=_SEED):
     """
-    Retourne un LazySampleList d'n images (même seed → même sélection que load_eval_data).
-    Seuls les image_ids sont en mémoire ; chemins et tailles sont résolus à la demande.
+    Return a LazySampleList of n images (same seed -> same selection as load_eval_data).
+    Only image_ids live in memory; paths and sizes are resolved on demand.
     """
     coco, ids = _sample(ann_file, n, seed)
     return LazySampleList(ids, coco, img_dir)
@@ -106,9 +106,9 @@ def load_profiling_data(img_dir, ann_file, n=_N, seed=_SEED):
 
 def load_eval_data(img_dir, ann_file, n=_N, seed=_SEED):
     """
-    Retourne (LazySampleList, coco_gt).
-    Même remarque : images non chargées, chemins non pré-calculés.
-    coco_gt est l'objet COCO complet (annotations) pour COCOeval.
+    Return (LazySampleList, coco_gt).
+    Same remark: images are not loaded, paths are not pre-computed.
+    coco_gt is the full COCO object (annotations) for COCOeval.
     """
     coco, ids = _sample(ann_file, n, seed)
     return LazySampleList(ids, coco, img_dir), coco

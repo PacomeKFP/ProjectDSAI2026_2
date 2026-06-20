@@ -1,23 +1,23 @@
 """
 optimizations/paths.py
-═══════════════════════
-Préfixe de sortie unifié — permet de rediriger TOUS les artefacts (résultats,
-logs, modèles, profils) vers un dossier persistant (Google Drive sur Colab),
-sans changer le code qui écrit.
+=======================
+Unified output prefix -- redirects ALL artifacts (results, logs, models,
+profiles) to a persistent folder (Google Drive on Colab) without changing
+the writing code.
 
-Logique du préfixe :
-  • En local      : préfixe vide → les chemins restent relatifs au projet.
-  • Sur Colab     : "/content/drive/MyDrive/ProjectDSAI2026_2" → tout est écrit
-                    directement sur le Drive monté (créé si besoin).
-  • Override      : variable d'env PROJECT_OUTPUT_PREFIX, ou set_prefix().
+Prefix logic:
+  * Local       : empty prefix -> paths stay relative to the project.
+  * On Colab    : "/content/drive/MyDrive/ProjectDSAI2026_2" -> everything is
+                  written directly on the mounted Drive (created if needed).
+  * Override    : PROJECT_OUTPUT_PREFIX env variable, or set_prefix().
 
-Usage :
+Usage:
     from optimizations.paths import out_path, ensure_dir, project_prefix
-    run_dir = ensure_dir("results", "optimization", run_id)   # crée + retourne Path
-    csv     = out_path("results", "x.csv")                     # juste le Path préfixé
+    run_dir = ensure_dir("results", "optimization", run_id)   # creates + returns Path
+    csv     = out_path("results", "x.csv")                     # just the prefixed Path
 
-⚠ L'utilisateur monte lui-même le Drive (drive.mount). Ce module ne monte rien ;
-  il se contente de préfixer les chemins et de créer les dossiers à la demande.
+[!] The user mounts Drive themselves (drive.mount). This module does not mount
+  anything; it only prefixes paths and creates folders on demand.
 """
 
 from __future__ import annotations
@@ -26,15 +26,15 @@ import os
 import sys
 from pathlib import Path
 
-# Préfixe par défaut sur Colab (Drive monté par l'utilisateur)
+# Default prefix on Colab (Drive mounted by the user)
 _COLAB_DEFAULT = "/content/drive/MyDrive/ProjectDSAI2026_2"
 
-# Préfixe courant (modifiable via set_prefix)
+# Current prefix (modifiable via set_prefix)
 _PREFIX: str | None = None
 
 
 def _detect_prefix() -> str:
-    """Détecte le préfixe : env > Colab > local (vide)."""
+    """Detect the prefix: env > Colab > local (empty)."""
     env = os.environ.get("PROJECT_OUTPUT_PREFIX")
     if env is not None:
         return env
@@ -44,7 +44,7 @@ def _detect_prefix() -> str:
 
 
 def project_prefix() -> str:
-    """Retourne le préfixe courant (détecté à la première utilisation)."""
+    """Return the current prefix (detected on first use)."""
     global _PREFIX
     if _PREFIX is None:
         _PREFIX = _detect_prefix()
@@ -52,7 +52,7 @@ def project_prefix() -> str:
 
 
 def set_prefix(prefix: str) -> str:
-    """Force le préfixe (ex. dans le notebook après avoir monté le Drive)."""
+    """Force the prefix (e.g. in the notebook after mounting Drive)."""
     global _PREFIX
     _PREFIX = prefix
     if prefix:
@@ -61,20 +61,20 @@ def set_prefix(prefix: str) -> str:
 
 
 def out_path(*parts: str | os.PathLike) -> Path:
-    """Chemin préfixé (sans créer de dossier)."""
+    """Prefixed path (without creating any folder)."""
     prefix = project_prefix()
     return (Path(prefix) / Path(*parts)) if prefix else Path(*parts)
 
 
 def ensure_dir(*parts: str | os.PathLike) -> Path:
-    """Chemin préfixé + création récursive du dossier. Retourne le Path."""
+    """Prefixed path + recursive folder creation. Returns the Path."""
     p = out_path(*parts)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def ensure_parent(*parts: str | os.PathLike) -> Path:
-    """Chemin préfixé d'un fichier + création de son dossier parent."""
+    """Prefixed file path + creation of its parent folder."""
     p = out_path(*parts)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
@@ -82,5 +82,5 @@ def ensure_parent(*parts: str | os.PathLike) -> Path:
 
 def describe() -> str:
     prefix = project_prefix()
-    where = prefix if prefix else "(local, préfixe vide)"
-    return f"Préfixe de sortie : {where}"
+    where = prefix if prefix else "(local, empty prefix)"
+    return f"Output prefix: {where}"

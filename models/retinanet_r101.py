@@ -8,36 +8,40 @@ from torchvision.ops.feature_pyramid_network import LastLevelP6P7
 from torchvision.ops import misc as misc_nn_ops
 from utils.data_loader import read_rgb
 
-# ⚠ AUCUN RetinaNet-R101 préentraîné COCO n'existe dans torchvision ni Detectron2.
-#   (D2 ne fournit que retinanet_R_50 ; torchvision que retinanet_resnet50_fpn[_v2].)
+# [!] NO COCO-pretrained RetinaNet-R101 exists in either torchvision or Detectron2.
+#   (D2 only ships retinanet_R_50; torchvision only retinanet_resnet50_fpn[_v2].)
 #
-# On construit ici un RetinaNet avec backbone ResNet-101 préentraîné ImageNet + FPN,
-# en miroir exact de la construction torchvision de retinanet_resnet50_fpn, mais avec
-# resnet101 à la place de resnet50. La TÊTE de détection est initialisée ALÉATOIREMENT.
+# Here we build a RetinaNet with an ImageNet-pretrained ResNet-101 backbone +
+# FPN, mirroring exactly torchvision's construction of retinanet_resnet50_fpn,
+# but with resnet101 instead of resnet50. The detection HEAD is initialized
+# RANDOMLY.
 #
-# Conséquences :
-#   • SPEED BENCHMARK valide : le coût de calcul (backbone + FPN + têtes conv) ne dépend
-#     pas des valeurs des poids. De plus, torchvision initialise le biais de la tête de
-#     classification avec prior_probability=0.01 → presque aucune détection ne passe le
-#     seuil → NMS léger → le forward mesuré reflète bien l'architecture R101.
-#   • MAP NON SIGNIFICATIVE : la tête n'étant pas entraînée, evaluate_map() renverra ~0.
-#     À utiliser uniquement pour la vitesse et les optimisations (compile/FP16/TS/TRT).
+# Consequences:
+#   * SPEED BENCHMARK valid: the compute cost (backbone + FPN + conv heads)
+#     does not depend on the weight values. Furthermore, torchvision
+#     initializes the classification-head bias with prior_probability=0.01 ->
+#     almost no detection passes the threshold -> light NMS -> the measured
+#     forward correctly reflects the R101 architecture.
+#   * MAP NOT MEANINGFUL: since the head is untrained, evaluate_map() will
+#     return ~0. To be used for speed and optimizations only
+#     (compile/FP16/TS/TRT).
 #
-# Interface identique à models/retinanet_r50.py (entrée List[Tensor[3,H,W]]) → drop-in
-# pour benchmark_model(), run_map_evaluation() et le pipeline optimizations/.
+# Interface identical to models/retinanet_r50.py (input List[Tensor[3,H,W]])
+# -> drop-in for benchmark_model(), run_map_evaluation() and the
+# optimizations/ pipeline.
 
 _SCALE = 640.0
 
 
 def _build_retinanet_r101(num_classes=91, min_size=640, max_size=640,
                           device="cuda", **kwargs):
-    """Construit RetinaNet + ResNet-101-FPN (backbone ImageNet, tête aléatoire)."""
+    """Build RetinaNet + ResNet-101-FPN (ImageNet backbone, random head)."""
     backbone = resnet101(
         weights=ResNet101_Weights.IMAGENET1K_V2,
-        norm_layer=misc_nn_ops.FrozenBatchNorm2d,   # convention détection (BN figée)
+        norm_layer=misc_nn_ops.FrozenBatchNorm2d,   # detection convention (frozen BN)
     )
-    # _resnet_fpn_extractor : même config que torchvision retinanet_resnet50_fpn
-    #   returned_layers=[2,3,4] → C3,C4,C5 ; extra_blocks=P6,P7 calculés depuis P5
+    # _resnet_fpn_extractor: same config as torchvision retinanet_resnet50_fpn
+    #   returned_layers=[2,3,4] -> C3,C4,C5; extra_blocks=P6,P7 computed from P5
     backbone = _resnet_fpn_extractor(
         backbone, trainable_layers=3,
         returned_layers=[2, 3, 4],
@@ -48,15 +52,15 @@ def _build_retinanet_r101(num_classes=91, min_size=640, max_size=640,
     return model.eval().to(device)
 
 
-# ── Profiling ──────────────────────────────────────────────────────────────────
+# -- Profiling ------------------------------------------------------------------
 
 def load_model(device="cuda"):
-    """640×640 — benchmark de vitesse standardisé. Backbone ImageNet, tête aléatoire."""
+    """640x640 -- standardized speed benchmark. ImageNet backbone, random head."""
     return _build_retinanet_r101(min_size=640, max_size=640, device=device)
 
 
 def preprocess(sample):
-    """Load image → resize to 640×640 → Tensor[3,H,W] float32 [0,1] CPU."""
+    """Load image -> resize to 640x640 -> Tensor[3,H,W] float32 [0,1] CPU."""
     img = read_rgb(sample)
     img = cv2.resize(img, (640, 640))
     img = img.astype(np.float32) / 255.0
@@ -64,12 +68,12 @@ def preprocess(sample):
 
 
 def collate(inputs, device):
-    """List[Tensor[3,H,W]] CPU → List[Tensor[3,H,W]] on device."""
+    """List[Tensor[3,H,W]] CPU -> List[Tensor[3,H,W]] on device."""
     return [t.to(device) for t in inputs]
 
 
 def postprocess(raw_item, orig_size):
-    """Boxes in 640-space → rescale to original image coordinates."""
+    """Boxes in 640-space -> rescale to original image coordinates."""
     orig_h, orig_w = orig_size
     sx, sy = orig_w / _SCALE, orig_h / _SCALE
     boxes = raw_item["boxes"].clone()
@@ -88,19 +92,19 @@ def run_inference(model, sample, device="cuda"):
     return result
 
 
-# ── COCO-standard MAP evaluation ───────────────────────────────────────────────
-# ⚠ Tête non entraînée → MAP ~0. Conservé pour cohérence d'interface avec r50/fcos.
+# -- COCO-standard MAP evaluation -----------------------------------------------
+# [!] Untrained head -> MAP ~0. Kept for interface consistency with r50/fcos.
 
 def load_model_eval(device="cuda"):
-    """Résolution native (800/1333), score_thresh=0.01.
-    ⚠ Tête aléatoire → MAP non significative (vitesse uniquement)."""
-    print("[r101] ⚠ Tête de détection non entraînée — la MAP sera ~0 (vitesse uniquement).")
+    """Native resolution (800/1333), score_thresh=0.01.
+    [!] Random head -> MAP not meaningful (speed only)."""
+    print("[r101] [!] Detection head untrained -- MAP will be ~0 (speed only).")
     return _build_retinanet_r101(min_size=800, max_size=1333,
                                  score_thresh=0.01, device=device)
 
 
 def preprocess_eval(sample):
-    """Load at original resolution → Tensor[3,H,W] float32 [0,1] CPU.
+    """Load at original resolution -> Tensor[3,H,W] float32 [0,1] CPU.
     torchvision handles internal resizing."""
     img = read_rgb(sample)
     img = img.astype(np.float32) / 255.0
@@ -117,6 +121,6 @@ def postprocess_eval(raw_item, orig_size):
 
 
 def evaluate_map(model, data, coco_gt, device="cuda"):
-    """COCO-standard MAP evaluation. ⚠ Renvoie ~0 (tête non entraînée)."""
+    """COCO-standard MAP evaluation. [!] Returns ~0 (untrained head)."""
     from eval.map_eval import run_map_evaluation
     return run_map_evaluation(model, data, coco_gt, preprocess_eval, collate, postprocess_eval, device)

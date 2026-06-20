@@ -49,8 +49,8 @@ def postprocess(raw_item, orig_size):
 
 
 def postprocess_map(raw_item, orig_size):
-    """Postprocess pour l'ÉVAL MAP@640 — sans le « +1 » sur le label (qui casse
-    l'appariement des catégories COCO), échelle /640, seuil de score 0.05."""
+    """Postprocess for MAP@640 EVAL -- without the "+1" on the label (which
+    breaks COCO category matching), /640 scale, 0.05 score threshold."""
     orig_h, orig_w = orig_size
     sx = orig_w / _SCALE_PROF
     sy = orig_h / _SCALE_PROF

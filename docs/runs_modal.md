@@ -1,196 +1,229 @@
-# Runs Modal — historique, résultats, limites
+# Modal runs -- history, results, limits
 
-> Document vivant. Mis à jour après chaque run et chaque correction.
-> Sert de référence pour le rapport et pour décider des prochaines actions.
+> Living document. Updated after every run and every fix.
+> Reference for the report and for deciding the next actions.
 
 ---
 
-## Glossaire des variantes
+## Variant glossary
 
-### Modèle complet (NMS dynamique inclus)
-| Variante | Description |
+### Full model (dynamic NMS included)
+| Variant | Description |
 |---|---|
-| `baseline` | FP32 brut, référence |
-| `fp16` | autocast (Tensor Cores), zéro compilation |
+| `baseline` | raw FP32, reference |
+| `fp16` | autocast (Tensor Cores), zero compilation |
 | `torchscript` | `jit.script` + `freeze` + `optimize_for_inference` |
 | `compile` | `torch.compile` backend `inductor`, `dynamic=False` |
-| `cudagraphs` | `torch.compile` backend `cudagraphs` (capture de graphe CUDA) |
+| `cudagraphs` | `torch.compile` backend `cudagraphs` (CUDA graph capture) |
 | `compile_fp16` | autocast + inductor |
 | `cudagraphs_fp16` | autocast + cudagraphs |
 | `torchscript_fp16` | autocast + torchscript |
-| `trt_fp16` | TensorRT FP16 via `torch_tensorrt`, modèle complet |
+| `trt_fp16` | TensorRT FP16 via `torch_tensorrt`, full model |
 
-### Par zone (backbone+FPN+heads optimisé, NMS reste eager)
-| Variante | Description |
+### Zone-based (backbone+FPN+heads optimized, NMS stays eager)
+| Variant | Description |
 |---|---|
-| `zone_torchscript` | TorchScript sur zone statique |
-| `zone_compile` | inductor sur zone statique |
-| `zone_cudagraphs` | CUDA graphs sur zone statique |
-| `zone_trt_fp16` | TensorRT FP16 sur backbone (pièce TRT propre — exigence prof) |
-| `zone_trt_folded` | constant-fold (`jit.freeze`) **puis** TRT — pour BiFPN |
+| `zone_torchscript` | TorchScript on the static zone |
+| `zone_compile` | inductor on the static zone |
+| `zone_cudagraphs` | CUDA graphs on the static zone |
+| `zone_trt_fp16` | TensorRT FP16 on the backbone (clean TRT piece -- advisor's requirement) |
+| `zone_trt_folded` | constant-fold (`jit.freeze`) **then** TRT -- for the BiFPN |
 | `mixed_trt_bb__cudagraphs_rest` | TRT(backbone) + cudagraphs(FPN+heads) |
 
 ---
 
-## Historique des runs
+## Run history
 
-### Run #1 — 2026-06-15 21:00 (Colab T4)
+### Run #1 -- 2026-06-15 21:00 (Colab T4)
 
-**Contexte** : R50 sur Colab T4, sortie console seulement (pas de Volume).
+**Context**: R50 on Colab T4, console output only (no Volume).
 
-**Résultats** (R50, full-model uniquement, 500 images éval) :
+**Results** (R50, full-model only, 500 eval images):
 
-| Variante | ms | FPS | speedup | MAP | Statut |
+| Variant | ms | FPS | speedup | MAP | Status |
 |---|---|---|---|---|---|
-| baseline | 58.55 | 17.1 | ×1.00 | 0.401 | OK |
-| fp16 | 62.65 | 16.0 | **×0.94** | 0.401 | OK (régresse) |
-| torchscript | 50.94 | 19.6 | ×1.15 | 0.401 | OK |
-| compile | 61.02 | 16.4 | **×0.96** | — | OK (régresse) |
-| cudagraphs | 64.92 | 15.4 | **×0.90** | — | OK (régresse) |
-| **compile_fp16** | **32.47** | **30.8** | **×1.80** | 0.401 | **OK ⭐** |
-| cudagraphs_fp16 | 43.39 | 23.0 | ×1.35 | 0.401 | OK |
-| torchscript_fp16 | 44.75 | 22.3 | ~~×1.31~~ | 0.401 | **OK (FAUX)** |
-| `trt_fp16` | — | — | — | — | **FAILED** |
+| baseline | 58.55 | 17.1 | x1.00 | 0.401 | OK |
+| fp16 | 62.65 | 16.0 | **x0.94** | 0.401 | OK (regresses) |
+| torchscript | 50.94 | 19.6 | x1.15 | 0.401 | OK |
+| compile | 61.02 | 16.4 | **x0.96** | -- | OK (regresses) |
+| cudagraphs | 64.92 | 15.4 | **x0.90** | -- | OK (regresses) |
+| **compile_fp16** | **32.47** | **30.8** | **x1.80** | 0.401 | **OK *** |
+| cudagraphs_fp16 | 43.39 | 23.0 | x1.35 | 0.401 | OK |
+| torchscript_fp16 | 44.75 | 22.3 | ~~x1.31~~ | 0.401 | **OK (FALSE)** |
+| `trt_fp16` | -- | -- | -- | -- | **FAILED** |
 
-### Run #2 — 2026-06-15 23:42 (Modal A100 80 GB)
+### Run #2 -- 2026-06-15 23:42 (Modal A100 80 GB)
 
-**Contexte** : premier test Modal, A100 80 GB, image NGC 24.10 **avec** `add_python="3.11"`.
+**Context**: first Modal test, A100 80 GB, NGC 24.10 image **with** `add_python="3.11"`.
 
-**Résultats** (R50, 500 images éval, 4 variantes seulement) :
+**Results** (R50, 500 eval images, only 4 variants):
 
-| Variante | ms | speedup | MAP | Statut |
+| Variant | ms | speedup | MAP | Status |
 |---|---|---|---|---|
-| baseline | 30.99 | ×1.00 | 0.401 | OK |
-| fp16 | 42.76 | **×0.725** | 0.401 | OK (régresse) |
-| `trt_fp16` | — | — | — | **SKIPPED** (TRT absent) |
-| compile_fp16 | 19.85 | ×1.56 | 0.401 | OK |
+| baseline | 30.99 | x1.00 | 0.401 | OK |
+| fp16 | 42.76 | **x0.725** | 0.401 | OK (regresses) |
+| `trt_fp16` | -- | -- | -- | **SKIPPED** (TRT missing) |
+| compile_fp16 | 19.85 | x1.56 | 0.401 | OK |
 
-**Anomalie majeure** : `torch_tensorrt` et `tensorrt` étaient absents du conteneur
-malgré la base NGC. Cause : **`add_python="3.11"` réinstalle Python par-dessus
-NGC** et casse les paquets natifs préinstallés. → **Fix appliqué dans Run #3**.
+**Major anomaly**: `torch_tensorrt` and `tensorrt` were absent from the
+container despite the NGC base. Cause: **`add_python="3.11"` reinstalls
+Python on top of NGC** and breaks the preinstalled native packages.
+-> **Fix applied in Run #3**.
 
-### Run #3 — à venir (Modal T4 16 GB, 3 modèles × ~15 variantes)
+### Run #3 -- upcoming (Modal T4 16 GB, 3 models x ~15 variants)
 
-**Configuration** :
-- Image : NGC 24.10 **sans** `add_python` (Python 3.10 natif préservé)
-- GPU : T4 16 GB
-- CPU/RAM : 8 vCPU / 32 GB par conteneur
-- Volume `dsai2026` (1 TB inclus dans plan Starter)
-- Caches partagés : `TORCH_HOME=/data/cache/torch`, `HF_HOME=/data/cache/hf`
-- Paramètres : N_WARMUP=50, N_MEASURE=1000, N_PROFILE=150, N_PROFILE_DATA=2000, N_EVAL=2000
-- 1 conteneur par couple (modèle, variante), parallélisme = 6
-- 3 modèles × 12-15 variantes = ~42 jobs
+**Configuration**:
+- Image: NGC 24.10 **without** `add_python` (native Python 3.10 preserved)
+- GPU: T4 16 GB
+- CPU/RAM: 8 vCPUs / 32 GB per container
+- Volume `dsai2026` (1 TB included in the Starter plan)
+- Shared caches: `TORCH_HOME=/data/cache/torch`, `HF_HOME=/data/cache/hf`
+- Parameters: N_WARMUP=50, N_MEASURE=1000, N_PROFILE=150, N_PROFILE_DATA=2000, N_EVAL=2000
+- 1 container per (model, variant), parallelism = 6
+- 3 models x 12-15 variants = ~42 jobs
 
-**Tableau à remplir après le run**.
+**Table to be filled in after the run**.
 
 ---
 
-## Limites observées par approche
+## Limits observed per approach
 
 ### baseline
-- OK partout. Métrique de référence.
+- OK everywhere. Reference metric.
 
-### fp16 (autocast pur)
-- **Régresse** sur A100 (×0.725) et sur T4 (×0.94) **quand le baseline est rapide** : l'overhead des casts FP32↔FP16 dépasse le gain Tensor Cores.
-- → FP16 seul n'est jamais le gagnant ; il faut **combiner avec une compilation** (compile, torchscript).
+### fp16 (pure autocast)
+- **Regresses** on A100 (x0.725) and on T4 (x0.94) **when the baseline is
+  fast**: the FP32<->FP16 cast overhead exceeds the Tensor Cores gain.
+- -> FP16 alone is never the winner; it must be **combined with a
+  compilation** (compile, torchscript).
 
 ### torchscript (full)
-- T4 : ×1.15 (gain modeste — fusion Conv+BN).
-- Avec FP16 wrapper, la trace échoue (mauvais format input) → **doit lever une exception**, pas retourner le modèle original. **Fix appliqué.**
+- T4: x1.15 (modest gain -- Conv+BN fusion).
+- With the FP16 wrapper, the trace fails (wrong input format) -> **must
+  raise an exception**, not return the original model. **Fix applied.**
 
 ### compile (full)
-- Le NMS dynamique cause des **recompilations en boucle** sur `decode_single`, `batched_nms`, `clip_boxes_to_image`.
-- Atteint `recompile_limit (8)` → retombe en eager pour les shapes non vues.
-- T4 : ×0.96 (régresse). N'est utile **qu'en combinaison avec FP16**.
+- The dynamic NMS causes **recompile loops** on `decode_single`,
+  `batched_nms`, `clip_boxes_to_image`.
+- Hits `recompile_limit (8)` -> falls back to eager for the unseen shapes.
+- T4: x0.96 (regresses). Only useful **combined with FP16**.
 
 ### cudagraphs (full)
-- **`skipping cudagraphs due to cpu device`** sur `anchor_generator.set_cell_anchors` et `_batched_nms_coordinate_trick`.
-- **`CUDA Graph is empty`** — cudagraphs ne capture rien d'utile.
-- T4 : ×0.90 (régresse). Inutilisable sur le modèle complet.
+- **`skipping cudagraphs due to cpu device`** on
+  `anchor_generator.set_cell_anchors` and `_batched_nms_coordinate_trick`.
+- **`CUDA Graph is empty`** -- cudagraphs captures nothing useful.
+- T4: x0.90 (regresses). Unusable on the full model.
 
 ### compile_fp16 (full)
-- **Le winner du modèle complet** : T4 ×1.80, A100 ×1.56.
-- Subit aussi des recompiles NMS mais le gain backbone domine.
-- À mettre en avant dans le rapport.
+- **The full-model winner**: T4 x1.80, A100 x1.56.
+- Also suffers NMS recompiles but the backbone gain dominates.
+- To be highlighted in the report.
 
 ### trt_fp16 (full)
-- **Échec systématique** : `out of bounds slice ... input dimensions = [0,1]` puis `Error while setting the input shape`.
-- Cause racine : le NMS produit parfois zéro détection → TRT essaie de compiler avec input batch=0.
-- TRT demande explicitement dans le log : *« consider constant fold the model first »* et *« set upper bound on dynamic shapes »*.
-- → **Inutilisable sur le modèle complet.** La solution est `zone_trt_fp16`.
+- **Systematic failure**: `out of bounds slice ... input dimensions = [0,1]`
+  then `Error while setting the input shape`.
+- Root cause: the NMS sometimes produces zero detections -> TRT tries to
+  compile with input batch=0.
+- TRT explicitly asks in the log: *"consider constant fold the model first"*
+  and *"set upper bound on dynamic shapes"*.
+- -> **Unusable on the full model.** The solution is `zone_trt_fp16`.
 
-### zone_trt_fp16 — la voie TRT propre
-- Optimise **uniquement** le backbone (shapes fixes 640×640), laisse le NMS en eager.
-- Pas de shapes dynamiques → TRT compile proprement.
-- **C'est ce qu'on doit présenter dans le rapport pour satisfaire l'exigence prof.**
-- À mesurer dans Run #3.
+### zone_trt_fp16 -- the clean TRT path
+- Optimizes **only** the backbone (fixed 640x640 shapes), leaves the NMS in
+  eager.
+- No dynamic shapes -> TRT compiles cleanly.
+- **This is what we must present in the report to satisfy the advisor's
+  requirement.**
+- To be measured in Run #3.
 
-### zone_trt_folded — pour le BiFPN (EfficientDet)
-- `jit.freeze` propage les constantes des poids gelés → la **fusion pondérée** du BiFPN devient une addition pondérée standard → TRT peut la fusionner.
-- TRT le réclamait explicitement (*« consider constant fold the model first »*).
-- À mesurer dans Run #3.
+### zone_trt_folded -- for the BiFPN (EfficientDet)
+- `jit.freeze` propagates the constants of the frozen weights -> the
+  **weighted fusion** of the BiFPN becomes a standard weighted addition ->
+  TRT can fuse it.
+- TRT explicitly asked for it (*"consider constant fold the model first"*).
+- To be measured in Run #3.
 
 ### zone_cudagraphs
-- ×1.71 sur R50 mesuré en local (RTX 5060) → la **suppression de l'overhead de lancement** des kernels est le levier sur GPU rapide.
-- À confirmer sur T4 (gain probablement plus modeste car T4 plus lente, donc l'overhead pèse moins en relatif).
+- x1.71 on R50 measured locally (RTX 5060) -> **removing the kernel launch
+  overhead** is the lever on fast GPUs.
+- To be confirmed on T4 (gain probably more modest because the T4 is
+  slower, so the overhead weighs less in relative terms).
 
 ### mixed_trt_bb__cudagraphs_rest
-- Hypothèse : TRT(backbone) + cudagraphs(FPN+heads) cumule les gains.
-- À mesurer sur les 3 modèles. Risque : les transitions entre régions optimisées peuvent coûter (copies de buffers).
+- Hypothesis: TRT(backbone) + cudagraphs(FPN+heads) stacks the gains.
+- To be measured on the 3 models. Risk: the transitions between optimized
+  regions can be costly (buffer copies).
 
 ---
 
-## Fixes appliqués
+## Applied fixes
 
-### Fix #1 — `torchscript` fail-loud (commité)
-Avant : si `script` et `trace` échouent, `optimize_with_torchscript` retournait le modèle original silencieusement. Le runner mesurait alors le modèle eager et rapportait un **faux speedup** (cf. Run #1, `torchscript_fp16` ×1.31 fictif).
-Après : lève `RuntimeError`. Le try/except du runner marque `FAILED` proprement.
+### Fix #1 -- `torchscript` fail-loud (committed)
+Before: if `script` and `trace` failed, `optimize_with_torchscript` silently
+returned the original model. The runner then measured the eager model and
+reported a **fake speedup** (cf. Run #1, fake x1.31 for `torchscript_fp16`).
+After: raises `RuntimeError`. The runner's try/except marks it `FAILED`
+cleanly.
 
-### Fix #2 — Modal sans `add_python` (commité)
-Avant : `add_python="3.11"` réinstallait Python par-dessus NGC, dégradant les paquets natifs (torch_tensorrt, tensorrt). → TRT indisponible.
-Après : on garde le Python NGC natif. `effdet` et `timm` installés avec `--no-deps` pour ne pas toucher au `torch` NGC. TRT préservé.
+### Fix #2 -- Modal without `add_python` (committed)
+Before: `add_python="3.11"` reinstalled Python on top of NGC, degrading the
+native packages (torch_tensorrt, tensorrt). -> TRT unavailable.
+After: we keep the native NGC Python. `effdet` and `timm` installed with
+`--no-deps` to avoid touching the NGC `torch`. TRT preserved.
 
-### Fix #3 — caches partagés sur le Volume (commité)
-Avant : chaque conteneur re-téléchargeait `retinanet_resnet50_fpn_v2_coco-5905b1c5.pth` (146 MB).
-Après : `TORCH_HOME=/data/cache/torch` → téléchargé une fois, partagé entre tous les conteneurs Modal.
+### Fix #3 -- shared caches on the Volume (committed)
+Before: each container re-downloaded
+`retinanet_resnet50_fpn_v2_coco-5905b1c5.pth` (146 MB).
+After: `TORCH_HOME=/data/cache/torch` -> downloaded once, shared across all
+Modal containers.
 
-### Fix #4 — granularité 1 job = 1 (modèle, variante) (commité)
-Avant : tous les variantes d'un modèle dans un seul conteneur → heartbeat timeouts (MAP eval bloquante), pollution d'état possible (résolu par reset mais fragile).
-Après : un conteneur par couple. Plus d'isolation, plus de timeouts heartbeat, relance ciblée gratuite.
-
----
-
-## À faire (demain ou plus tard)
-
-Liste des chantiers identifiés, à coder une fois Run #3 analysé :
-
-- [ ] **Bornage shapes dynamiques pour TRT** : `torch._dynamo.mark_dynamic` ou `torch.export.Dim` pour fixer un upper bound sur le nombre max de boîtes après NMS → permettrait `trt_fp16` full-model (peu prioritaire car `zone_trt_fp16` est la vraie voie).
-- [ ] **Constant folding via onnxsim** pour la voie C2 du cahier (alternative à `jit.freeze` pour `zone_trt_folded`).
-- [ ] **Réécriture éventuelle de `FpnCombine.forward` (BiFPN)** pour utiliser les coefficients pré-calculés à l'inférence (`relu(w)/Σw` → constantes en eval) → rend le BiFPN TRT-friendly sans dépendre de `freeze`.
-- [ ] Analyse profilers : extraire les opérations les plus accélérables (point 2 du cahier des charges) à partir des CSV de `/data/results/<run_id>/profiles/`.
+### Fix #4 -- granularity 1 job = 1 (model, variant) (committed)
+Before: all variants of a model in a single container -> heartbeat timeouts
+(blocking MAP eval), potential state pollution (resolved by reset but fragile).
+After: one container per pair. More isolation, no heartbeat timeouts,
+targeted re-run for free.
 
 ---
 
-## Pour interpréter un run
+## TODO (later)
 
-Récupérer les résultats :
+List of identified work items, to be coded once Run #3 is analyzed:
+
+- [ ] **Bounding dynamic shapes for TRT**: `torch._dynamo.mark_dynamic` or
+  `torch.export.Dim` to set an upper bound on the maximum number of boxes
+  after NMS -> would enable full-model `trt_fp16` (low priority because
+  `zone_trt_fp16` is the real way).
+- [ ] **Constant folding via onnxsim** for path C2 from the design doc
+  (alternative to `jit.freeze` for `zone_trt_folded`).
+- [ ] **Possible rewrite of `FpnCombine.forward` (BiFPN)** to use coefficients
+  pre-computed at inference (`relu(w)/sumw` -> constants in eval) -> makes the
+  BiFPN TRT-friendly without depending on `freeze`.
+- [ ] Profiler analysis: extract the most accelerable operations
+  (specification point 2) from the CSVs in `/data/results/<run_id>/profiles/`.
+
+---
+
+## How to interpret a run
+
+Fetch the results:
 ```bash
 modal volume get dsai2026 results/<run_id> ./local_run/
 ```
 
-Arborescence type :
+Typical tree:
 ```
 local_run/
-  results.csv                    ← tableau de synthèse (à ouvrir d'abord)
-  bench/<model>_<variant>.json   ← métriques de vitesse brutes
-  eval/<model>_<variant>.json    ← MAP/AR COCO complètes (par variante)
-  modules/<model>_<variant>.csv  ← timing par module feuille (baseline/fp16)
-  profiles/<model>_<variant>.csv ← table d'opérations (kernels/mémoire)
-  logs/<model>_<variant>.log     ← stdout/stderr complet du conteneur
-  errors/<model>_<variant>.txt   ← traceback Python si CONTAINER_FAILED
+  results.csv                    <- summary table (open first)
+  bench/<model>_<variant>.json   <- raw speed metrics
+  eval/<model>_<variant>.json    <- full COCO MAP/AR (per variant)
+  modules/<model>_<variant>.csv  <- per-leaf-module timing (baseline/fp16)
+  profiles/<model>_<variant>.csv <- operation table (kernels/memory)
+  logs/<model>_<variant>.log     <- full container stdout/stderr
+  errors/<model>_<variant>.txt   <- Python traceback if CONTAINER_FAILED
 ```
 
-Pour comprendre pourquoi une variante a échoué :
-1. Regarder `results.csv` → statut
-2. Si `FAILED` ou `CONTAINER_FAILED` → ouvrir `errors/<model>_<variant>.txt` et `logs/<model>_<variant>.log`
-3. Chercher dans le log les warnings spécifiques au framework (TRT, dynamo, cudagraphs)
+To understand why a variant failed:
+1. Look at `results.csv` -> status
+2. If `FAILED` or `CONTAINER_FAILED` -> open `errors/<model>_<variant>.txt`
+   and `logs/<model>_<variant>.log`
+3. Search the log for framework-specific warnings (TRT, dynamo, cudagraphs)

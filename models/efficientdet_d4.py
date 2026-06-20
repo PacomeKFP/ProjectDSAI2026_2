@@ -6,10 +6,10 @@ import torchvision.transforms.functional as TF
 from effdet import create_model
 from utils.data_loader import read_rgb
 
-# ── Config ─────────────────────────────────────────────────────────────────────
+# -- Config ---------------------------------------------------------------------
 
 _MODEL_NAME  = "tf_efficientdet_d4"
-_NATIVE_SIZE = (1024, 1024)   # H × W — training resolution
+_NATIVE_SIZE = (1024, 1024)   # H x W -- training resolution
 _SCALE_PROF  = 640.0
 
 _MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -19,10 +19,10 @@ _IMAGENET_MEAN = [0.485, 0.456, 0.406]
 _IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 
-# ── Profiling ──────────────────────────────────────────────────────────────────
+# -- Profiling ------------------------------------------------------------------
 
 def load_model(device="cuda"):
-    """640×640 — standardised speed benchmark."""
+    """640x640 -- standardised speed benchmark."""
     model = create_model(
         _MODEL_NAME, pretrained=True, num_classes=90,
         image_size=(640, 640), bench_task="predict",
@@ -31,7 +31,7 @@ def load_model(device="cuda"):
 
 
 def preprocess(sample):
-    """Load → resize to 640×640 → normalise → Tensor[1,3,H,W] float32 CPU."""
+    """Load -> resize to 640x640 -> normalise -> Tensor[1,3,H,W] float32 CPU."""
     img = read_rgb(sample)
     img = cv2.resize(img, (640, 640))
     img = img.astype(np.float32) / 255.0
@@ -40,7 +40,7 @@ def preprocess(sample):
 
 
 def collate(inputs, device):
-    """List[Tensor[1,3,H,W]] CPU → Tensor[B,3,H,W] on device."""
+    """List[Tensor[1,3,H,W]] CPU -> Tensor[B,3,H,W] on device."""
     return torch.cat(inputs, dim=0).to(device)
 
 
@@ -56,12 +56,12 @@ def postprocess(raw_item, orig_size):
 
 
 def postprocess_map(raw_item, orig_size):
-    """Postprocess pour l'ÉVAL MAP@640 (pipeline benchmark, entrée 640×640).
+    """Postprocess for MAP@640 EVAL (benchmark pipeline, 640x640 input).
 
-    Identique à postprocess MAIS sans le « +1 » sur le label : le décalage +1
-    casse l'appariement des catégories COCO (AP s'effondre à ~0.009). On utilise
-    la convention de label de postprocess_eval (det[:,5] sans +1), avec l'échelle
-    /640 propre au pipeline benchmark et un seuil de score 0.05.
+    Identical to postprocess BUT without the "+1" on the label: the +1 shift
+    breaks the COCO category matching (AP collapses to ~0.009). We use the
+    postprocess_eval label convention (det[:,5] without +1), with the /640
+    scale specific to the benchmark pipeline and a 0.05 score threshold.
     """
     orig_h, orig_w = orig_size
     sx = orig_w / _SCALE_PROF
@@ -83,17 +83,17 @@ def run_inference(model, sample, device="cuda"):
     return result
 
 
-# ── COCO-standard MAP evaluation — pipeline copié fidèlement de l'ancien code ──
-# PIL + F.to_tensor + F.normalize, sans num_classes explicite, sans +1 label
+# -- COCO-standard MAP evaluation -- pipeline faithfully copied from old code ---
+# PIL + F.to_tensor + F.normalize, no explicit num_classes, no +1 label
 
 def load_model_eval(device="cuda"):
-    """Native resolution — COCO-standard evaluation."""
+    """Native resolution -- COCO-standard evaluation."""
     model = create_model(_MODEL_NAME, pretrained=True, bench_task="predict")
     return model.eval().to(device)
 
 
 def preprocess_eval(sample):
-    """Pipeline PIL fidèle à l'ancien code : PIL → resize → F.to_tensor → F.normalize."""
+    """PIL pipeline faithful to the old code: PIL -> resize -> F.to_tensor -> F.normalize."""
     img = Image.open(sample["path"]).convert("RGB")
     img = img.resize((_NATIVE_SIZE[1], _NATIVE_SIZE[0]), Image.BILINEAR)
     t = TF.to_tensor(img)
@@ -102,7 +102,7 @@ def preprocess_eval(sample):
 
 
 def postprocess_eval(raw_item, orig_size):
-    """Boxes → rescale. Labels sans +1 (copie ancien code)."""
+    """Boxes -> rescale. Labels without +1 (faithful to old code)."""
     orig_h, orig_w = orig_size
     sx = orig_w / _NATIVE_SIZE[1]
     sy = orig_h / _NATIVE_SIZE[0]

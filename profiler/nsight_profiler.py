@@ -1,58 +1,58 @@
 """
 profiler/nsight_profiler.py
-───────────────────────────
-Profilage bas-niveau via NVIDIA Nsight Systems.
+---------------------------
+Low-level profiling via NVIDIA Nsight Systems.
 
-Principe de fonctionnement :
-─────────────────────────────
-Nsight Systems (nsys) est un profiler système externe — il s'accroche au
-processus Python depuis l'extérieur et enregistre tous les événements CUDA,
-cuDNN, cublas, NVTX, OS, etc.
+How it works:
+-------------
+Nsight Systems (nsys) is an external system-level profiler -- it hooks into the
+Python process from the outside and records every CUDA, cuDNN, cuBLAS, NVTX,
+OS event, etc.
 
-Ce fichier joue deux rôles :
-  1. Fonction callable  : `profile_with_nsight(model, data, ...)`
-     Ajoute des annotations NVTX à plusieurs niveaux et délimite la fenêtre
-     de capture avec cudaProfilerStart / cudaProfilerStop.
-     → À utiliser quand le process Python est lancé sous nsys (voir commande).
+This file plays two roles:
+  1. Callable function : `profile_with_nsight(model, data, ...)`
+     Adds NVTX annotations at several levels and bounds the capture window
+     with cudaProfilerStart / cudaProfilerStop.
+     -> To be used when the Python process is launched under nsys (see command).
 
-  2. Script standalone  : `python -m profiler.nsight_profiler --model <nom> ...`
-     Charge le modèle et les données, puis appelle profile_with_nsight.
-     C'est ce script que nsys doit envelopper (voir print_nsys_command).
+  2. Standalone script : `python -m profiler.nsight_profiler --model <name> ...`
+     Loads the model and the data, then calls profile_with_nsight.
+     This is the script that nsys must wrap (see print_nsys_command).
 
-Mécanique de capture :
-──────────────────────
-  • cudaProfilerStart / cudaProfilerStop  →  API CUDA officielle pour délimiter
-    la fenêtre de capture. Avec `--capture-range=cudaProfilerApi`, nsys
-    n'enregistre que ce qui se passe entre ces deux appels (= phase active).
-    La phase warmup est exécutée mais NON capturée → fichier .nsys-rep compact.
+Capture mechanics:
+------------------
+  * cudaProfilerStart / cudaProfilerStop  ->  official CUDA API to bound the
+    capture window. With `--capture-range=cudaProfilerApi`, nsys only records
+    what happens between these two calls (= active phase). The warmup phase
+    runs but is NOT captured -> compact .nsys-rep file.
 
-  • NVTX ranges  →  annotations hiérarchiques visibles dans la timeline Nsight :
-      Niveau 0 : "WARMUP" / "ACTIVE"           (phases globales)
-      Niveau 1 : "iter_N"                       (chaque itération)
-      Niveau 2 : "preprocess" / "H2D" / "forward"  (étapes internes)
+  * NVTX ranges  ->  hierarchical annotations visible in the Nsight timeline:
+      Level 0: "WARMUP" / "ACTIVE"            (global phases)
+      Level 1: "iter_N"                        (each iteration)
+      Level 2: "preprocess" / "H2D" / "forward"  (internal steps)
 
-Données collectées (flags nsys recommandés) :
-──────────────────────────────────────────────
+Data collected (recommended nsys flags):
+----------------------------------------
   --trace=cuda,nvtx,cuDNN,cublas,cusparse
-      cuda    : kernels GPU, copies H2D/D2H, synchronisations
-      nvtx    : nos annotations + annotations internes PyTorch/cuDNN
-      cuDNN   : appels cuDNN (conv, BN, pooling) avec formes et algorithmes
-      cublas  : appels cuBLAS (matmul, gemm) avec formes
-      cusparse: opérations sparse (si utilisées)
+      cuda    : GPU kernels, H2D/D2H copies, synchronizations
+      nvtx    : our annotations + internal PyTorch/cuDNN annotations
+      cuDNN   : cuDNN calls (conv, BN, pooling) with shapes and algorithms
+      cublas  : cuBLAS calls (matmul, gemm) with shapes
+      cusparse: sparse operations (if used)
 
   --cuda-memory-usage=true
-      Allocations / désallocations GPU avec pile d'appels
+      GPU allocations / deallocations with call stacks
 
   --gpu-metrics-device=0
-      Compteurs hardware : SM occupancy, L1/L2 hit rate,
-      bande passante mémoire, IPC — données inaccessibles depuis PyTorch
+      Hardware counters: SM occupancy, L1/L2 hit rate, memory bandwidth,
+      IPC -- data not accessible from PyTorch
 
-Usage :
-───────
-  # 1. Générer la commande nsys complète
+Usage:
+------
+  # 1. Generate the full nsys command
   python -m profiler.nsight_profiler --model retinanet_r50 --print-command
 
-  # 2. Lancer le profiling
+  # 2. Launch the profiling
   nsys profile \\
       --capture-range=cudaProfilerApi \\
       --trace=cuda,nvtx,cuDNN,cublas,cusparse \\
@@ -65,8 +65,8 @@ Usage :
           --ann-file datasets/coco/annotations/instances_val2017.json \\
           --n-warmup 50 --n-active 1000
 
-  # 3. Ouvrir le résultat dans Nsight Systems GUI
-  #    File → Open → results/profiler/nsight/retinanet_r50.nsys-rep
+  # 3. Open the result in the Nsight Systems GUI
+  #    File -> Open -> results/profiler/nsight/retinanet_r50.nsys-rep
 """
 
 import gc
@@ -76,9 +76,9 @@ from pathlib import Path
 import torch
 
 
-# ── NVTX helpers ───────────────────────────────────────────────────────────────
-# torch.cuda.nvtx est toujours disponible avec PyTorch CUDA.
-# Le package 'nvtx' (pip install nvtx) ajoute la gestion des couleurs.
+# -- NVTX helpers ---------------------------------------------------------------
+# torch.cuda.nvtx is always available with PyTorch CUDA.
+# The 'nvtx' package (pip install nvtx) adds color support.
 
 try:
     import nvtx as _nvtx_pkg
@@ -87,7 +87,7 @@ try:
     def _pop():
         _nvtx_pkg.pop_range()
 except ImportError:
-    # Fallback : torch.cuda.nvtx (sans couleurs)
+    # Fallback: torch.cuda.nvtx (without colors)
     def _push(label, color=None):
         torch.cuda.nvtx.range_push(label)
     def _pop():
@@ -95,7 +95,7 @@ except ImportError:
 
 
 class _NvtxRange:
-    """Context manager NVTX — fonctionne avec ou sans le package nvtx."""
+    """NVTX context manager -- works with or without the nvtx package."""
     def __init__(self, label, color=None):
         self.label = label
         self.color = color
@@ -106,7 +106,7 @@ class _NvtxRange:
         _pop()
 
 
-# ── Profiler principal ─────────────────────────────────────────────────────────
+# -- Main profiler --------------------------------------------------------------
 
 def profile_with_nsight(
     model,
@@ -119,36 +119,36 @@ def profile_with_nsight(
     device="cuda",
 ):
     """
-    Annote le forward pass avec NVTX et délimite la capture avec
+    Annotates the forward pass with NVTX and bounds the capture with
     cudaProfilerStart / cudaProfilerStop.
 
-    Ce code doit être lancé sous nsys (voir module docstring).
-    En exécution normale (sans nsys), les annotations sont des no-ops
-    et cudaProfilerStart/Stop sont sans effet.
+    This code must be launched under nsys (see module docstring).
+    In a regular execution (without nsys), the annotations are no-ops and
+    cudaProfilerStart/Stop have no effect.
 
     Parameters
     ----------
-    model         : nn.Module en mode eval
-    data          : LazySampleList (n_warmup + n_active éléments minimum)
+    model         : nn.Module in eval mode
+    data          : LazySampleList (at least n_warmup + n_active items)
     preprocess_fn : model.preprocess
     collate_fn    : model.collate
-    n_warmup      : itérations hors fenêtre de capture (GPU warmup)
-    n_active      : itérations dans la fenêtre de capture
-    model_name    : label utilisé dans les annotations NVTX
-    device        : 'cuda' ou 'cpu'
+    n_warmup      : iterations outside the capture window (GPU warmup)
+    n_active      : iterations inside the capture window
+    model_name    : label used in the NVTX annotations
+    device        : 'cuda' or 'cpu'
     """
     n_total = n_warmup + n_active
     if len(data) < n_total:
         raise ValueError(
-            f"data contient {len(data)} samples, besoin de {n_total}."
+            f"data contains {len(data)} samples, need {n_total}."
         )
 
     model.eval()
     cudart = torch.cuda.cudart()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PHASE WARMUP — hors fenêtre de capture nsys
-    # ══════════════════════════════════════════════════════════════════════════
+    # ==========================================================================
+    # WARMUP PHASE -- outside the nsys capture window
+    # ==========================================================================
     with _NvtxRange("WARMUP", color="gray"):
         with torch.no_grad():
             for i, s in enumerate(data[:n_warmup]):
@@ -169,9 +169,9 @@ def profile_with_nsight(
 
     torch.cuda.synchronize()
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # PHASE ACTIVE — fenêtre de capture nsys (cudaProfilerApi)
-    # ══════════════════════════════════════════════════════════════════════════
+    # ==========================================================================
+    # ACTIVE PHASE -- nsys capture window (cudaProfilerApi)
+    # ==========================================================================
     cudart.cudaProfilerStart()
 
     with _NvtxRange("ACTIVE", color="green"):
@@ -185,12 +185,12 @@ def profile_with_nsight(
                     with _NvtxRange("H2D", color="orange"):
                         gpu = collate_fn([inp], device)
                         del inp
-                        torch.cuda.synchronize()   # H2D terminé avant forward
+                        torch.cuda.synchronize()   # H2D done before forward
 
                     with _NvtxRange("forward", color="red"):
                         model(gpu)
 
-                    torch.cuda.synchronize()       # forward terminé
+                    torch.cuda.synchronize()       # forward done
                     del gpu
 
     cudart.cudaProfilerStop()
@@ -200,7 +200,7 @@ def profile_with_nsight(
         torch.cuda.empty_cache()
 
 
-# ── Générateur de commande nsys ────────────────────────────────────────────────
+# -- nsys command generator ----------------------------------------------------
 
 def print_nsys_command(
     model_name,
@@ -211,7 +211,7 @@ def print_nsys_command(
     output_dir="results/profiler/nsight",
     device="cuda",
 ):
-    """Affiche la commande nsys complète prête à copier-coller."""
+    """Print the full nsys command ready to copy-paste."""
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     out = str(Path(output_dir) / model_name)
     cmd = (
@@ -228,13 +228,13 @@ def print_nsys_command(
         f"        --n-active {n_active} \\\n"
         f"        --device {device}"
     )
-    print("\n-- Commande Nsight Systems -----------------------------------")
+    print("\n-- Nsight Systems command ------------------------------------")
     print(cmd)
     print("--------------------------------------------------------------\n")
     return cmd
 
 
-# ── Script standalone (lancé par nsys) ────────────────────────────────────────
+# -- Standalone script (launched by nsys) --------------------------------------
 
 _MODEL_MAP = {
     "retinanet_r50":    "models.retinanet_r50",
@@ -250,7 +250,7 @@ if __name__ == "__main__":
     import argparse
     import importlib
 
-    # Ajouter la racine du projet au path
+    # Add the project root to the path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
     from utils.data_loader import load_profiling_data
@@ -263,7 +263,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-active", type=int, default=1000)
     parser.add_argument("--device",   default="cuda")
     parser.add_argument("--print-command", action="store_true",
-                        help="Afficher la commande nsys et quitter")
+                        help="Print the nsys command and exit")
     args = parser.parse_args()
 
     if args.print_command:
@@ -277,22 +277,22 @@ if __name__ == "__main__":
         )
         sys.exit(0)
 
-    # Chargement dynamique du module modèle
+    # Dynamic loading of the model module
     mod = importlib.import_module(_MODEL_MAP[args.model])
 
-    # Créer le répertoire de sortie si nécessaire (nsys ne le fait pas)
+    # Create the output directory if needed (nsys does not do it)
     Path("results/profiler/nsight").mkdir(parents=True, exist_ok=True)
 
-    print(f"[nsight] Chargement modèle : {args.model}")
+    print(f"[nsight] Loading model: {args.model}")
     model = mod.load_model(args.device)
 
-    print(f"[nsight] Chargement données : {args.n_warmup + args.n_active} images")
+    print(f"[nsight] Loading data: {args.n_warmup + args.n_active} images")
     data = load_profiling_data(
         args.img_dir, args.ann_file,
         n=args.n_warmup + args.n_active,
     )
 
-    print(f"[nsight] Démarrage — warmup={args.n_warmup}  active={args.n_active}")
+    print(f"[nsight] Starting -- warmup={args.n_warmup}  active={args.n_active}")
     profile_with_nsight(
         model=model,
         data=data,
@@ -303,4 +303,4 @@ if __name__ == "__main__":
         model_name=args.model,
         device=args.device,
     )
-    print("[nsight] Terminé. Ouvrir le .nsys-rep dans Nsight Systems GUI.")
+    print("[nsight] Done. Open the .nsys-rep file in the Nsight Systems GUI.")

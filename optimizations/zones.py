@@ -1,31 +1,33 @@
 """
 optimizations/zones.py
-═══════════════════════
-Optimisation CONSCIENTE DE L'ARCHITECTURE, par zone et SOUS-ZONE.
+=======================
+ARCHITECTURE-AWARE optimization, by zone and SUB-ZONE.
 
-Frontière statique / dynamique d'un détecteur :
+Static / dynamic boundary of a detector:
 
-  ┌─────────── ZONE STATIQUE (optimisable, shapes fixes 640) ──────────┐  ┌─ DYNAMIQUE ─┐
-  backbone + FPN/BiFPN + têtes                                            décodage + NMS
-        ▲ TRT / compile / cudagraphs / TorchScript                          ▲ eager (obligé)
+  +----------- STATIC ZONE (optimizable, fixed 640 shapes) ------------+  +- DYNAMIC -+
+  backbone + FPN/BiFPN + heads                                            decoding + NMS
+        ^ TRT / compile / cudagraphs / TorchScript                          ^ eager (forced)
 
-On REMPLACE des sous-modules par leur version optimisée, in-place. Le modèle
-complet garde son API ; benchmark / MAP / profiling tournent dessus.
+We REPLACE sub-modules with their optimized versions in-place. The full model
+keeps its API; benchmark / MAP / profiling run on it.
 
-Deux granularités :
-  • ZONE GROSSIÈRE (whole-zone)  — pour appliquer UN même outil à toute la partie
-    statique, en minimisant les frontières :
-        torchvision : model.backbone (body+fpn)  +  model.head
-        effdet      : model.model (backbone+fpn+class_net+box_net, têtes incluses)
-  • SOUS-ZONE (per-module)       — pour la variante MIXTE : chaque sous-module reçoit
-    l'outil adapté à SON architecture :
-        torchvision : body | fpn | head
-        effdet      : backbone | fpn | class_net | box_net
+Two granularities:
+  * COARSE ZONE (whole-zone) -- to apply ONE single tool to the whole static
+    part, minimizing boundaries:
+        torchvision: model.backbone (body+fpn)  +  model.head
+        effdet     : model.model (backbone+fpn+class_net+box_net, heads included)
+  * SUB-ZONE (per-module)    -- for the MIXED variant: each sub-module receives
+    the tool best suited to ITS architecture:
+        torchvision: body | fpn | head
+        effdet     : backbone | fpn | class_net | box_net
 
-Compatibilité par architecture de backbone :
-  • ResNet (R50, FCOS) — convolutions DENSES → FP16 Tensor Cores + fusion TRT efficaces.
-  • EfficientNet (effdet) — convolutions DEPTHWISE → FP16 peu utile (memory-bound) ;
-    le BiFPN (fusion pondérée) fusionne mal sous TRT → cudagraphs, ou constant-fold+TRT.
+Backbone compatibility:
+  * ResNet (R50, FCOS) -- DENSE convolutions -> FP16 Tensor Cores + TRT fusion
+    are very effective.
+  * EfficientNet (effdet) -- DEPTHWISE convolutions -> FP16 less useful
+    (memory-bound); the BiFPN (weighted fusion) fuses poorly under TRT
+    -> use cudagraphs, or constant-fold+TRT.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ import torch
 import torch.nn as nn
 
 
-# ── Cartographie des sous-zones (per-module, pour la variante mixte) ───────────
+# -- Sub-zone mapping (per-module, for the mixed variant) ----------------------
 
 SUBZONES = {
     "torchvision": ["backbone", "fpn", "head"],
@@ -46,15 +48,15 @@ SUBZONES = {
 
 
 def plan_mixed():
-    """Plan per-sous-zone de la variante mixte : un outil par module.
+    """Per-sub-zone plan for the mixed variant: one tool per module.
 
-    Backbone → TensorRT (entrée connue [1,3,640,640], pas de capture nécessaire).
-    Tout le reste → cudagraphs (pas d'exemple requis, supprime l'overhead de
-    lancement des nombreux petits kernels FPN/têtes).
+    Backbone -> TensorRT (known input [1,3,640,640], no capture needed).
+    Everything else -> cudagraphs (no example required, removes the launch
+    overhead of the many small FPN/head kernels).
 
-    Importé paresseusement (opt_trt_fp16 tire torch_tensorrt à la construction
-    du plan). Vit ici, à côté de SUBZONES, parce que c'est une décision
-    d'architecture, pas d'orchestration.
+    Lazily imported (opt_trt_fp16 pulls torch_tensorrt when the plan is built).
+    Lives here, next to SUBZONES, because it is an architecture decision,
+    not an orchestration one.
     """
     return {
         family: {
@@ -66,7 +68,7 @@ def plan_mixed():
 
 
 def get_subzone(model: nn.Module, family: str, name: str) -> Tuple[nn.Module, Callable]:
-    """Retourne (sous_module, setter) pour une sous-zone nommée (granularité fine)."""
+    """Return (submodule, setter) for a named sub-zone (fine granularity)."""
     if family == "torchvision":
         bb = model.backbone                       # BackboneWithFPN (body + fpn)
         if name == "backbone":
@@ -85,16 +87,16 @@ def get_subzone(model: nn.Module, family: str, name: str) -> Tuple[nn.Module, Ca
             return inner.class_net, lambda m: setattr(inner, "class_net", m)
         if name == "box_net":
             return inner.box_net, lambda m: setattr(inner, "box_net", m)
-    raise ValueError(f"sous-zone inconnue : {family}/{name}")
+    raise ValueError(f"unknown sub-zone: {family}/{name}")
 
 
-# ── Zones grossières (whole-zone, frontières minimales) ────────────────────────
+# -- Coarse zones (whole-zone, minimal boundaries) -----------------------------
 
 def get_coarse_zones(model: nn.Module, family: str,
                      include_heads: bool = True) -> List[Tuple[str, nn.Module, Callable]]:
     """
-    Grandes unités statiques contiguës (pour appliquer UN outil à toute la zone).
-    Retourne une liste de (nom, module, setter).
+    Large contiguous static units (to apply ONE tool to the whole zone).
+    Returns a list of (name, module, setter).
     """
     zones: List[Tuple[str, nn.Module, Callable]] = []
     if family == "torchvision":
@@ -102,29 +104,29 @@ def get_coarse_zones(model: nn.Module, family: str,
         if include_heads:
             zones.append(("head", model.head, lambda m: setattr(model, "head", m)))
     elif family == "effdet":
-        # model.model englobe déjà backbone + fpn + têtes → une seule unité.
+        # model.model already wraps backbone + fpn + heads -> a single unit.
         zones.append(("model", model.model, lambda m: setattr(model, "model", m)))
     else:
-        raise ValueError(f"famille inconnue : {family!r}")
+        raise ValueError(f"unknown family: {family!r}")
     return zones
 
 
 def get_static_zone(model: nn.Module, family: str) -> Tuple[nn.Module, Callable]:
-    """Zone statique principale (compat) : backbone (tv) ou model.model (effdet)."""
+    """Main static zone (compat): backbone (tv) or model.model (effdet)."""
     name, mod, setter = get_coarse_zones(model, family, include_heads=False)[0]
     return mod, setter
 
 
 def zone_example_input(device: str, size=(640, 640)) -> torch.Tensor:
-    """Entrée image de la zone : tenseur [1,3,H,W]."""
+    """Image input for the zone: tensor [1,3,H,W]."""
     h, w = size
     return torch.zeros(1, 3, h, w, device=device)
 
 
-# ── Capture des entrées intermédiaires (pour trace/TRT-foldé) ──────────────────
+# -- Capturing intermediate inputs (for trace/TRT-folded) ----------------------
 
 def _full_dummy(family: str, device: str, size=(640, 640)):
-    """Entrée du MODÈLE complet (format attendu par le forward)."""
+    """Input for the FULL model (format expected by the forward)."""
     h, w = size
     if family == "torchvision":
         return [torch.zeros(3, h, w, device=device)]      # List[Tensor]
@@ -136,15 +138,15 @@ def _full_dummy(family: str, device: str, size=(640, 640)):
 def _capture_inputs(model: nn.Module, family: str, device: str, size,
                     named_modules: List[Tuple[str, nn.Module]]) -> dict:
     """
-    Fait passer UN dummy dans le modèle complet et capture, via forward_pre_hooks,
-    le tuple d'arguments d'entrée de chaque module listé. Retourne {nom: (args...)}.
+    Run ONE dummy through the full model and capture, via forward_pre_hooks,
+    each listed module's input argument tuple. Returns {name: (args...)}.
     """
     captured: dict = {}
     handles = []
     for name, mod in named_modules:
         def make(nm):
             def hook(m, inp):
-                captured.setdefault(nm, inp)   # 1er appel seulement
+                captured.setdefault(nm, inp)   # first call only
             return hook
         handles.append(mod.register_forward_pre_hook(make(name)))
 
@@ -159,17 +161,17 @@ def _capture_inputs(model: nn.Module, family: str, device: str, size,
 
 
 def capture_subzone_inputs(model: nn.Module, family: str, device: str, size=(640, 640)) -> dict:
-    """Entrées réelles de chaque sous-zone fine (body/fpn/head…)."""
+    """Real inputs for each fine-grained sub-zone (body/fpn/head...)."""
     named = [(n, get_subzone(model, family, n)[0]) for n in SUBZONES[family]]
     return _capture_inputs(model, family, device, size, named)
 
 
-# ── Optimiseurs (module, ex, ctx) -> module optimisé ───────────────────────────
-# ex : exemple d'entrée (tuple capturé), nécessaire seulement pour trace/TRT-foldé.
-# ctx : {compile_backend, min_block_size, calib_loader}
+# -- Optimizers (module, ex, ctx) -> optimized module --------------------------
+# ex : example input (captured tuple), only needed for trace/TRT-folded.
+# ctx: {compile_backend, min_block_size, calib_loader}
 #
-# Pas d'opt_fp16 : l'autocast doit envelopper TOUT le forward (sinon fuite FP16
-# vers la tête FP32) → le FP16 est une optim du modèle complet (to_fp16_autocast).
+# No opt_fp16: autocast must wrap the WHOLE forward (otherwise FP16 leaks into
+# the FP32 head) -> FP16 is a full-model optimization (to_fp16_autocast).
 
 def opt_torchscript(zone, ex, ctx):
     zone.eval()
@@ -207,17 +209,17 @@ def opt_trt_fp16(zone, ex, ctx):
 
 def opt_trt_fp16_folded(zone, ex, ctx):
     """
-    TensorRT FP16 APRÈS constant-folding (voie C1 du cahier).
+    TensorRT FP16 AFTER constant-folding (path C1 from the design doc).
 
-    torch.jit.freeze propage les constantes : les poids gelés du BiFPN font que
-    relu(w)/(ε+Σrelu(w)) devient une CONSTANTE → la fusion pondérée se réduit à
-    une addition pondérée standard, que TRT sait fusionner. C'est ce que réclamaient
-    les warnings « consider constant fold the model first ».
+    torch.jit.freeze propagates constants: the frozen BiFPN weights turn
+    relu(w)/(eps+sumrelu(w)) into a CONSTANT -> the weighted fusion reduces to a
+    standard weighted addition that TRT knows how to fuse. This is what the
+    "consider constant fold the model first" warnings were asking for.
     """
     import torch_tensorrt
     zone.eval()
     scripted = torch.jit.trace(zone, ex, strict=False)
-    frozen   = torch.jit.freeze(scripted)                      # ← constant-fold
+    frozen   = torch.jit.freeze(scripted)                      # <- constant-fold
     inputs   = list(ex) if isinstance(ex, (tuple, list)) else [ex]
     return torch_tensorrt.compile(
         frozen, ir="torchscript", inputs=inputs,
@@ -230,7 +232,7 @@ def opt_trt_int8(zone, ex, ctx):
     import torch_tensorrt
     calib = ctx.get("calib_loader")
     if calib is None:
-        raise ValueError("opt_trt_int8 nécessite ctx['calib_loader']")
+        raise ValueError("opt_trt_int8 requires ctx['calib_loader']")
     from torch_tensorrt.ptq import DataLoaderCalibrator, CalibrationAlgo
     calibrator = DataLoaderCalibrator(
         calib, use_cache=False,
@@ -248,7 +250,7 @@ def opt_trt_int8(zone, ex, ctx):
     )
 
 
-# Optimiseurs qui ont besoin d'un exemple d'entrée (trace/freeze).
+# Optimizers that require an example input (trace/freeze).
 _NEEDS_EXAMPLE = {"opt_torchscript", "opt_trt_fp16_folded"}
 
 
@@ -256,7 +258,7 @@ def _needs_example(optimizer: Callable) -> bool:
     return getattr(optimizer, "__name__", "") in _NEEDS_EXAMPLE
 
 
-# ── Application : zone grossière (un même outil sur toute la zone statique) ─────
+# -- Application: coarse zone (one tool over the whole static zone) ------------
 
 def apply_zone_optimization(
     model: nn.Module,
@@ -268,18 +270,18 @@ def apply_zone_optimization(
     include_heads: bool = False,
 ) -> nn.Module:
     """
-    Applique `optimizer` à la zone grossière statique. Par défaut, UNE seule
-    région contiguë (backbone côté torchvision ; model.model côté effdet, qui
-    englobe déjà les têtes).
+    Apply `optimizer` to the coarse static zone. By default, a SINGLE
+    contiguous region (backbone on torchvision; model.model on effdet, which
+    already wraps the heads).
 
-    ⚠ include_heads=False par défaut — résultat MESURÉ : ajouter la tête comme
-    région compilée SÉPARÉE (torchvision) dégrade fortement cudagraphs (×0.48 vs
-    ×1.71 backbone seul), car les features FPN doivent être recopiées entre les
-    buffers statiques des deux régions à chaque itération. « Une grande région +
-    reste eager » bat « plusieurs petites régions ». La tête est explorée dans la
-    variante mixte (per-sous-zone) à titre de comparaison.
+    [!] include_heads=False by default -- MEASURED finding: adding the head as a
+    SEPARATE compiled region (torchvision) heavily degrades cudagraphs (x0.48
+    vs x1.71 backbone-only), because FPN features must be copied between the
+    two regions' static buffers on every iteration. "One big region + rest
+    eager" beats "many small regions". The head is explored in the mixed
+    variant (per-sub-zone) for comparison.
 
-    Chaque unité est optimisée en try/except (fallback eager isolé).
+    Each unit is optimized in try/except (isolated eager fallback).
     """
     model.eval()
     zones = get_coarse_zones(model, family, include_heads)
@@ -294,24 +296,24 @@ def apply_zone_optimization(
             ex = examples.get(name) if _needs_example(optimizer) else None
             setter(optimizer(mod, ex, ctx))
         except Exception as e:
-            print(f"[zone] '{name}' non optimise ({type(e).__name__}: {str(e)[:80]}) -> eager")
+            print(f"[zone] '{name}' not optimized ({type(e).__name__}: {str(e)[:80]}) -> eager")
     return model
 
 
-# ── Application : per-sous-zone (variante mixte, un outil par module) ───────────
+# -- Application: per-sub-zone (mixed variant, one tool per module) ------------
 
 def apply_subzone_plan(
     model: nn.Module,
     family: str,
-    plan: dict,                # {nom_sous_zone: optimiseur ou None}
+    plan: dict,                # {subzone_name: optimizer or None}
     ctx: dict,
     device: str = "cuda",
     size=(640, 640),
 ) -> nn.Module:
     """
-    Applique un outil DIFFÉRENT par sous-zone (None = laisser en eager).
-    Ne capture les entrées intermédiaires que si un optimiseur en a besoin.
-    Chaque sous-zone est optimisée en try/except (fallback eager isolé).
+    Apply a DIFFERENT tool per sub-zone (None = leave it as eager).
+    Only capture intermediate inputs if an optimizer needs them.
+    Each sub-zone is optimized in try/except (isolated eager fallback).
     """
     model.eval()
     need_capture = any(opt is not None and _needs_example(opt) for opt in plan.values())
@@ -326,5 +328,5 @@ def apply_subzone_plan(
             ex = examples.get(name) if _needs_example(optimizer) else None
             setter(optimizer(mod, ex, ctx))
         except Exception as e:
-            print(f"[subzone] '{name}' non optimise ({type(e).__name__}: {str(e)[:80]}) -> eager")
+            print(f"[subzone] '{name}' not optimized ({type(e).__name__}: {str(e)[:80]}) -> eager")
     return model

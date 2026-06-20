@@ -1,38 +1,38 @@
 """
 optimizations/torch_compile.py
-═══════════════════════════════
-Compilation de graphe via torch.compile (PyTorch 2.x).
+===============================
+Graph compilation via torch.compile (PyTorch 2.x).
 
-Dépendances :
+Dependencies:
   torch >= 2.0
-  Pour le backend "inductor" (le plus rapide) : triton
-    • Linux / Colab : Triton est inclus avec PyTorch CUDA → backend inductor OK.
-    • Windows       : Triton n'est PAS packagé par défaut → inductor lève
-                      TritonMissing. On bascule automatiquement sur "cudagraphs".
+  For the "inductor" backend (fastest): triton
+    * Linux / Colab: Triton ships with PyTorch CUDA -> inductor backend works.
+    * Windows      : Triton is NOT packaged by default -> inductor raises
+                     TritonMissing. We automatically fall back to "cudagraphs".
 
-Ce que ça fait — deux backends pertinents :
+What it does -- two relevant backends:
 
-  ┌─ inductor (Linux/Colab) ────────────────────────────────────────────────┐
-  │ Génère des kernels Triton fusionnés à partir du graphe FX.               │
-  │ Fusion verticale (Conv→BN→ReLU) + horizontale (ops parallèles).          │
-  │ Gain typique : ×1.3 à ×2.0. Premier appel lent (codegen + autotune).     │
-  └──────────────────────────────────────────────────────────────────────────┘
+  +- inductor (Linux/Colab) ------------------------------------------------+
+  | Generates fused Triton kernels from the FX graph.                        |
+  | Vertical fusion (Conv->BN->ReLU) + horizontal (parallel ops).              |
+  | Typical gain: x1.3 to x2.0. First call is slow (codegen + autotune).     |
+  +--------------------------------------------------------------------------+
 
-  ┌─ cudagraphs (Windows + Colab) ──────────────────────────────────────────┐
-  │ Capture la séquence de kernels CUDA en un « graphe CUDA » réexécutable.  │
-  │ N'élimine PAS le coût de calcul, mais supprime l'overhead de lancement   │
-  │ CPU de chaque kernel (dispatch Python + driver). Très efficace quand le  │
-  │ modèle lance beaucoup de petits kernels (ResNet/EfficientNet).           │
-  │ Aucune dépendance Triton. Gain typique : ×1.1 à ×1.5.                     │
-  │ Contrainte : shapes d'entrée fixes (OK ici, benchmark à 640×640).        │
-  └──────────────────────────────────────────────────────────────────────────┘
+  +- cudagraphs (Windows + Colab) ------------------------------------------+
+  | Captures the sequence of CUDA kernels as a replayable "CUDA graph".      |
+  | Does NOT remove compute cost, but removes the CPU launch overhead of     |
+  | each kernel (Python dispatch + driver). Very effective when the model    |
+  | launches many small kernels (ResNet/EfficientNet).                       |
+  | No Triton dependency. Typical gain: x1.1 to x1.5.                         |
+  | Constraint: fixed input shapes (OK here, benchmark at 640x640).          |
+  +--------------------------------------------------------------------------+
 
-Le modèle retourné garde exactement la même API que l'original
-(List[Tensor] pour RetinaNet, Tensor[B,C,H,W] pour EfficientDet)
-→ utilisable directement avec benchmark_model() et run_map_evaluation().
+The returned model keeps exactly the original API
+(List[Tensor] for RetinaNet, Tensor[B,C,H,W] for EfficientDet)
+-> directly usable with benchmark_model() and run_map_evaluation().
 
-Le premier appel forward déclenche la compilation JIT (warmup plus long) :
-prévoir au moins quelques itérations supplémentaires dans n_warmup.
+The first forward call triggers JIT compilation (longer warmup):
+budget at least a few extra iterations in n_warmup.
 """
 
 from __future__ import annotations
@@ -53,26 +53,26 @@ def compile_model(
     dynamic: bool = False,
 ) -> nn.Module:
     """
-    Compile le modèle avec torch.compile, en choisissant le backend adapté.
+    Compile the model with torch.compile, choosing the appropriate backend.
 
     Parameters
     ----------
-    model     : nn.Module en mode eval — issu de load_model()
-    backend   : None  → auto ("inductor" si Triton, sinon "cudagraphs")
+    model     : nn.Module in eval mode -- from load_model()
+    backend   : None  -> auto ("inductor" if Triton, else "cudagraphs")
                 "inductor" | "cudagraphs" | "eager" | ...
-    mode      : utilisé uniquement par le backend inductor
-                "default" recommandé pour la détection (PAS "reduce-overhead",
-                qui active cudagraphs → incompatible avec le NMS à shapes dynamiques).
-    fullgraph : exiger un graphe complet sans graph break (False recommandé
-                pour la détection — le NMS n'est pas traçable)
-    dynamic   : False (défaut) fige les shapes → bien moins de guards symboliques
-                → compilation BEAUCOUP plus rapide. Crucial pour EfficientDet/BiFPN,
-                où dynamic=True fait exploser le solveur sympy (compilation > 45 min).
-                Sûr ici car le benchmark est à résolution fixe 640×640.
+    mode      : used only by the inductor backend
+                "default" recommended for detection (NOT "reduce-overhead",
+                which enables cudagraphs -> incompatible with NMS dynamic shapes).
+    fullgraph : require a full graph without graph break (False recommended
+                for detection -- the NMS is not traceable)
+    dynamic   : False (default) freezes shapes -> far fewer symbolic guards
+                -> compilation MUCH faster. Crucial for EfficientDet/BiFPN,
+                where dynamic=True blows up the sympy solver (compilation > 45 min).
+                Safe here because the benchmark runs at a fixed 640x640 resolution.
 
     Returns
     -------
-    nn.Module avec même API que l'original. Premier forward = compilation JIT.
+    nn.Module with the same API as the original. First forward = JIT compilation.
     """
     if backend is None:
         backend = default_compile_backend()
@@ -80,46 +80,46 @@ def compile_model(
     model.eval()
 
     if backend == "inductor" and not has_triton():
-        print("[torch.compile] [!] backend 'inductor' demandé mais Triton absent.")
-        print("  -> Bascule automatique sur 'cudagraphs'.")
+        print("[torch.compile] [!] 'inductor' backend requested but Triton missing.")
+        print("  -> Auto-falling back to 'cudagraphs'.")
         backend = "cudagraphs"
 
-    # ── Backend inductor : utilise `mode` (Triton codegen) ────────────────────
+    # -- inductor backend: uses `mode` (Triton codegen) ------------------------
     if backend == "inductor":
         if mode not in _INDUCTOR_MODES:
-            raise ValueError(f"mode doit être parmi {_INDUCTOR_MODES}, reçu {mode!r}")
+            raise ValueError(f"mode must be in {_INDUCTOR_MODES}, got {mode!r}")
         if mode == "reduce-overhead":
-            print("[torch.compile] [!] mode='reduce-overhead' active cudagraphs ->")
-            print("  risque d'incompatibilité avec le NMS (shapes dynamiques).")
+            print("[torch.compile] [!] mode='reduce-overhead' enables cudagraphs ->")
+            print("  risk of incompatibility with NMS (dynamic shapes).")
         compiled = torch.compile(model, mode=mode, fullgraph=fullgraph, dynamic=dynamic)
         print(f"[torch.compile] backend=inductor  mode={mode!r}  dynamic={dynamic}")
-        print("  Fusion de kernels Triton. Premier appel lent (codegen).")
+        print("  Triton kernel fusion. First call is slow (codegen).")
 
-    # ── Backend cudagraphs : capture de graphe CUDA, sans Triton ──────────────
+    # -- cudagraphs backend: CUDA graph capture, no Triton ---------------------
     elif backend == "cudagraphs":
         compiled = torch.compile(model, backend="cudagraphs", fullgraph=fullgraph, dynamic=dynamic)
         print("[torch.compile] backend=cudagraphs")
-        print("  [!] Capture de graphe à shapes FIXES — incompatible avec le NMS dynamique")
-        print("    des détecteurs complets. À réserver au backbone seul.")
+        print("  [!] FIXED-shape graph capture -- incompatible with the dynamic NMS")
+        print("    of full detectors. Reserve for backbone-only.")
 
-    # ── Autres backends (eager, aot_eager, …) ─────────────────────────────────
+    # -- Other backends (eager, aot_eager, ...) ----------------------------------
     else:
         compiled = torch.compile(model, backend=backend, fullgraph=fullgraph, dynamic=dynamic)
         print(f"[torch.compile] backend={backend!r}  dynamic={dynamic}")
 
-    print("  -> Inclure le premier appel dans n_warmup (>= 5 itérations de marge).")
+    print("  -> Include the first call in n_warmup (>= 5 extra iterations margin).")
     return compiled
 
 
 def save_compiled(model: nn.Module, path: str) -> None:
     """
-    Sauvegarde le state_dict du modèle sous-jacent.
-    torch.compile ne modifie pas les poids — on sérialise le module original.
-    Pour recharger : recréer le modèle PyTorch puis rappeler compile_model().
+    Save the state_dict of the underlying model.
+    torch.compile does not modify the weights -- we serialize the original module.
+    To reload: rebuild the PyTorch model then call compile_model() again.
     """
     from pathlib import Path
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     underlying = getattr(model, "_orig_mod", model)
     torch.save(underlying.state_dict(), path)
-    print(f"[torch.compile] state_dict sauvegardé -> {path}")
-    print("  Recharger : load_model() puis compile_model().")
+    print(f"[torch.compile] state_dict saved -> {path}")
+    print("  To reload: load_model() then compile_model().")

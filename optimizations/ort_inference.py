@@ -1,37 +1,36 @@
 """
 optimizations/ort_inference.py
-═══════════════════════════════
-ONNX Runtime (ORT) avec CUDA Execution Provider.
+===============================
+ONNX Runtime (ORT) with the CUDA Execution Provider.
 
-Dépendances :
+Dependencies:
   onnxruntime-gpu >= 1.16    pip install onnxruntime-gpu
   onnx >= 1.14               pip install onnx
 
-Ce que ça fait :
-  ONNX Runtime est un runtime d'inférence cross-platform qui optimise les
-  graphes ONNX sans nécessiter TensorRT. Il utilise le "CUDA Execution Provider"
-  (EP) pour exécuter les opérations sur GPU via cuDNN/cuBLAS.
+What it does:
+  ONNX Runtime is a cross-platform inference runtime that optimizes ONNX
+  graphs without requiring TensorRT. It uses the "CUDA Execution Provider"
+  (EP) to run operations on the GPU via cuDNN/cuBLAS.
 
-  Avantages vs TensorRT :
-    ✓ Plus simple (pas de compilation d'engine longue)
-    ✓ Cross-platform (Windows inclus)
-    ✓ Supporte les formes dynamiques nativement
-    ✓ Bonne intégration avec les pipelines ML standard
+  Advantages vs TensorRT:
+    [OK] Simpler (no long engine compilation)
+    [OK] Cross-platform (Windows included)
+    [OK] Supports dynamic shapes natively
+    [OK] Nice integration with standard ML pipelines
 
-  Inconvénients vs TensorRT :
-    ✗ Moins de fusion de kernels (pas de CBR kernel, fusion limitée)
-    ✗ Pas de FP16 aussi agressif
-    ✗ Gains typiques 20-40% vs 60-100% pour TRT FP16
+  Disadvantages vs TensorRT:
+    [X] Less kernel fusion (no CBR kernel, limited fusion)
+    [X] FP16 not as aggressive
+    [X] Typical gains: 20-40% vs 60-100% for TRT FP16
 
-  Utilisation dans ce projet :
-    ORT opère sur l'export backbone_only (onnx_export.py). La tête de
-    détection (NMS, décodage des boîtes) reste en PyTorch.
-    Pour l'évaluation MAP complète, utiliser le modèle PyTorch original
-    ou TRT (qui préserve l'API complète).
+  Usage in this project:
+    ORT operates on the backbone_only export (onnx_export.py). The detection
+    head (NMS, box decoding) stays in PyTorch. For full MAP evaluation, use
+    the original PyTorch model or TRT (which preserves the full API).
 
-Architecture de ORTModel :
-  ORTModel wraps une session ORT et expose une API compatible avec
-  benchmark_model() pour mesurer le throughput backbone.
+ORTModel architecture:
+  ORTModel wraps an ORT session and exposes an API compatible with
+  benchmark_model() to measure backbone throughput.
 """
 
 from __future__ import annotations
@@ -46,13 +45,13 @@ import torch.nn as nn
 
 class ORTModel:
     """
-    Wrapper ONNX Runtime pour backbone de détection.
+    ONNX Runtime wrapper for a detection backbone.
 
-    Expose __call__(images) → List[Tensor] (feature maps par FPN level).
-    Compatible avec benchmark_model() pour le throughput backbone.
+    Exposes __call__(images) -> List[Tensor] (feature maps per FPN level).
+    Compatible with benchmark_model() for backbone throughput.
 
-    Pour la MAP complète, il faut ajouter la tête de détection et le NMS
-    en PyTorch par-dessus les features ORT — voir ORTDetectionModel.
+    For full MAP, add the detection head and NMS in PyTorch on top of the
+    ORT features -- see ORTDetectionModel.
     """
 
     def __init__(self, onnx_path: str, device: str = "cuda"):
@@ -72,14 +71,14 @@ class ORTModel:
         self.device   = device
         self._active_provider = self.session.get_providers()[0]
 
-        print(f"[ORT] Session créée — provider actif : {self._active_provider}")
-        print(f"  inputs  : {[i.name for i in self.session.get_inputs()]}")
-        print(f"  outputs : {[o.name for o in self.session.get_outputs()]}")
+        print(f"[ORT] Session created -- active provider: {self._active_provider}")
+        print(f"  inputs : {[i.name for i in self.session.get_inputs()]}")
+        print(f"  outputs: {[o.name for o in self.session.get_outputs()]}")
 
     def __call__(self, images) -> List[torch.Tensor]:
         """
-        images : Tensor[B, 3, H, W] ou List[Tensor[3, H, W]]
-        Retourne une liste de feature maps (une par FPN level).
+        images: Tensor[B, 3, H, W] or List[Tensor[3, H, W]]
+        Returns a list of feature maps (one per FPN level).
         """
         if isinstance(images, (list, tuple)):
             x = torch.stack(images)
@@ -94,20 +93,20 @@ class ORTModel:
         return self
 
     def benchmark_forward(self, images) -> List[torch.Tensor]:
-        """Alias pour compatibilité avec benchmark_model (qui appelle model(gpu))."""
+        """Alias for compatibility with benchmark_model (which calls model(gpu))."""
         return self(images)
 
 
 class ORTDetectionModel:
     """
-    Modèle de détection complet avec ORT backbone + tête PyTorch.
+    Full detection model with an ORT backbone + a PyTorch head.
 
-    Architecture :
-      images → [ORT backbone] → features → [PyTorch head + NMS] → List[Dict]
+    Architecture:
+      images -> [ORT backbone] -> features -> [PyTorch head + NMS] -> List[Dict]
 
-    Utile pour comparer ORT vs PyTorch vs TRT sur MAP complète.
-    Nécessite accès aux attributs internes du modèle (head, anchor_generator, etc.)
-    → implémenté seulement pour RetinaNet torchvision.
+    Useful to compare ORT vs PyTorch vs TRT on full MAP.
+    Requires access to the model's internal attributes (head, anchor_generator, etc.)
+    -> implemented only for torchvision RetinaNet.
     """
 
     def __init__(self, pytorch_model: nn.Module, ort_model: ORTModel):
@@ -119,18 +118,18 @@ class ORTDetectionModel:
         self.device           = ort_model.device
 
     def __call__(self, images: List[torch.Tensor]) -> List[dict]:
-        # Transform (normalisation torchvision)
+        # Transform (torchvision normalization)
         imgs, targets = self.transform(images, None)
 
         # Backbone via ORT
         features_list = self.ort(imgs.tensors)
-        # Reconstituer l'OrderedDict attendu par le head RetinaNet
+        # Rebuild the OrderedDict expected by the RetinaNet head
         from collections import OrderedDict
         features = OrderedDict(
             {str(i): f for i, f in enumerate(features_list)}
         )
 
-        # Head PyTorch (classification + regression)
+        # PyTorch head (classification + regression)
         with torch.no_grad():
             head_out = self.head(features)
             anchors  = self.anchor_generator(imgs, list(features.values()))
@@ -145,32 +144,32 @@ class ORTDetectionModel:
         return self
 
 
-# ── Fonction de construction ──────────────────────────────────────────────────
+# -- Build function ------------------------------------------------------------
 
 def build_ort_model(
     onnx_path: str,
     device: str = "cuda",
 ) -> ORTModel:
     """
-    Construit une session ONNX Runtime à partir d'un fichier .onnx.
+    Build an ONNX Runtime session from an .onnx file.
 
     Parameters
     ----------
-    onnx_path : chemin vers le .onnx exporté par onnx_export.export_backbone_only()
-    device    : "cuda" ou "cpu"
+    onnx_path : path to the .onnx exported by onnx_export.export_backbone_only()
+    device    : "cuda" or "cpu"
 
     Returns
     -------
-    ORTModel — callable compatible avec benchmark_model() pour le backbone.
+    ORTModel -- callable compatible with benchmark_model() for the backbone.
     """
     if not Path(onnx_path).exists():
-        raise FileNotFoundError(f"Fichier ONNX non trouvé : {onnx_path}")
+        raise FileNotFoundError(f"ONNX file not found: {onnx_path}")
 
     try:
         import onnxruntime  # noqa: F401
     except ImportError:
         raise ImportError(
-            "onnxruntime-gpu non installé.\n"
+            "onnxruntime-gpu not installed.\n"
             "  pip install onnxruntime-gpu"
         )
 
@@ -183,33 +182,33 @@ def build_ort_detection_model(
     device: str = "cuda",
 ) -> ORTDetectionModel:
     """
-    Construit un modèle de détection complet ORT + tête PyTorch (RetinaNet uniquement).
+    Build a full ORT + PyTorch head detection model (RetinaNet only).
 
     Parameters
     ----------
-    pytorch_model : modèle PyTorch original (pour la tête + NMS)
-    onnx_path     : .onnx backbone exporté avec export_backbone_only()
-    device        : "cuda" ou "cpu"
+    pytorch_model : original PyTorch model (for the head + NMS)
+    onnx_path     : backbone .onnx exported with export_backbone_only()
+    device        : "cuda" or "cpu"
 
     Returns
     -------
-    ORTDetectionModel — callable qui retourne List[Dict] (même format que PyTorch).
+    ORTDetectionModel -- callable returning List[Dict] (same format as PyTorch).
     """
     ort_backbone = build_ort_model(onnx_path, device)
     return ORTDetectionModel(pytorch_model, ort_backbone)
 
 
-# ── Analyse des providers disponibles ────────────────────────────────────────
+# -- Available providers analysis ---------------------------------------------
 
 def list_ort_providers() -> List[str]:
-    """Liste les Execution Providers disponibles dans cette installation ORT."""
+    """List the Execution Providers available in this ORT install."""
     try:
         import onnxruntime as ort
         providers = ort.get_available_providers()
-        print("[ORT] Providers disponibles :")
+        print("[ORT] Available providers:")
         for p in providers:
             print(f"  {p}")
         return providers
     except ImportError:
-        print("[ORT] onnxruntime non installé — pip install onnxruntime-gpu")
+        print("[ORT] onnxruntime not installed -- pip install onnxruntime-gpu")
         return []

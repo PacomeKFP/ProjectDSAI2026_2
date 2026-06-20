@@ -1,7 +1,7 @@
-"""utils/tqdm_compat.py — un seul point d'import pour tqdm.auto.
+"""utils/tqdm_compat.py -- single import point for tqdm.auto.
 
-Dégrade en identité no-op si tqdm absent. Centralisé pour éviter la duplication
-du fallback dans benchmark.py / map_eval.py / pytorch_profiler.py.
+Degrades to an identity no-op if tqdm is missing. Centralized to avoid
+duplicating the fallback in benchmark.py / map_eval.py / pytorch_profiler.py.
 """
 
 try:

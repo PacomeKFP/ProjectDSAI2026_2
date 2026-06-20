@@ -1,33 +1,34 @@
-# Dépendances de base du projet (modèles, benchmark, évaluation, profilage).
-# Les dépendances d'OPTIMISATION (torch-tensorrt, onnx, onnxruntime-gpu, onnxsim)
-# ne sont PAS ici — elles sont installées directement dans optimization_full.ipynb.
+# Base project dependencies (models, benchmark, evaluation, profiling).
+# OPTIMIZATION dependencies (torch-tensorrt, onnx, onnxruntime-gpu, onnxsim)
+# are NOT listed here -- they are installed directly in optimization_full.ipynb
+# (or in the Modal image, see modal_runner.py).
 
-# ── Deep Learning ──────────────────────────────────────────────────────────────
+# -- Deep Learning -------------------------------------------------------------
 torch>=2.0.0
-torchvision>=0.15.0     # RetinaNet R50/R101, FCOS R50 (R101 reconstruit depuis resnet101)
+torchvision>=0.15.0     # RetinaNet R50/R101, FCOS R50 (R101 rebuilt from resnet101)
 
-# ── Vision / détection ─────────────────────────────────────────────────────────
-effdet                  # EfficientDet D4/D5/D6 (porte aussi timm en dépendance)
-timm>=0.9.0             # backbones EfficientNet pour effdet
+# -- Vision / detection --------------------------------------------------------
+effdet                  # EfficientDet D4/D5/D6 (also pulls timm as a dependency)
+timm>=0.9.0             # EfficientNet backbones for effdet
 
-# ── Données et évaluation ──────────────────────────────────────────────────────
-# Windows : si pycocotools échoue, utiliser :  pip install pycocotools-windows
+# -- Data and evaluation -------------------------------------------------------
+# Windows: if pycocotools fails, use:  pip install pycocotools-windows
 pycocotools
 opencv-python
 Pillow
 
-# ── Numérique / utilitaires ────────────────────────────────────────────────────
+# -- Numerical / utilities -----------------------------------------------------
 numpy
 pandas
-psutil                  # détection mémoire libre (RAM/VRAM adaptive batch)
-tqdm                    # barre de progression dans setup.py
+psutil                  # free-memory detection (RAM/VRAM adaptive batch)
+tqdm                    # progress bar in setup.py
 
-# ── Profilage (phase baseline) ─────────────────────────────────────────────────
-tensorboard             # export PyTorch Profiler + visualisation TensorBoard
-nvtx                    # annotations couleur Nsight Systems (optionnel)
+# -- Profiling (baseline phase) ------------------------------------------------
+tensorboard             # PyTorch Profiler export + TensorBoard visualization
+nvtx                    # Nsight Systems color annotations (optional)
 
-# ── Detectron2 ─────────────────────────────────────────────────────────────────
-# Conservé par précaution (R101 est désormais en torchvision, mais on garde D2
-# disponible au cas où). NON installé via pip — géré par setup.py (clone + extraction).
-# Pour l'installer directement :
+# -- Detectron2 ----------------------------------------------------------------
+# Kept as a safeguard (R101 is now in torchvision, but we keep D2 available
+# just in case). NOT installed via pip -- handled by setup.py (clone + extract).
+# To install directly:
 #   pip install 'git+https://github.com/facebookresearch/detectron2.git'

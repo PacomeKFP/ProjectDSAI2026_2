@@ -1,40 +1,40 @@
 """
 optimizations/tensorrt_fp16.py
-═══════════════════════════════
-TensorRT FP16 via torch_tensorrt — fusion de kernels + demi-précision.
+===============================
+TensorRT FP16 via torch_tensorrt -- kernel fusion + half precision.
 
-Dépendances :
+Dependencies:
   torch >= 2.1
   torch-tensorrt >= 2.1    pip install torch-tensorrt
-  tensorrt >= 8.6          pre-installé sur Colab GPU / NGC containers
-                           (inclus dans torch-tensorrt sur Colab)
+  tensorrt >= 8.6          pre-installed on Colab GPU / NGC containers
+                           (bundled with torch-tensorrt on Colab)
 
-  ⚠ Windows : TensorRT n'est PAS disponible sur Windows via pip standard.
-    Utiliser impérativement sur Colab, un container NVIDIA, ou WSL2.
+  [!] Windows: TensorRT is NOT available on Windows via standard pip.
+    Use Colab, an NVIDIA container, or WSL2.
 
-Ce que ça fait :
-  torch_tensorrt compile le modèle PyTorch en engine TensorRT optimisé.
-  L'approche utilisée ici est le backend torch.compile (ir="torch_compile")
-  qui est le plus robuste pour les modèles de détection :
-    - Garde le NMS et les ops Python complexes dans PyTorch (pas exporté vers TRT)
-    - Envoie les blocs Conv/BN/ReLU/FPN dans des sous-graphes TRT optimisés
-    - Retourne un modèle avec EXACTEMENT la même API que l'original
-      → fonctionne directement avec benchmark_model() et run_map_evaluation()
+What it does:
+  torch_tensorrt compiles the PyTorch model into an optimized TensorRT engine.
+  The approach used here is the torch.compile backend (ir="torch_compile"),
+  which is the most robust for detection models:
+    - Keeps the NMS and complex Python ops inside PyTorch (not exported to TRT)
+    - Sends the Conv/BN/ReLU/FPN blocks into optimized TRT sub-graphs
+    - Returns a model with EXACTLY the same API as the original
+      -> works directly with benchmark_model() and run_map_evaluation()
 
-  Optimisations appliquées par TRT :
-    • Fusion Conv + BN + activation → 1 seul kernel (Conv-BN-ReLU → CBR kernel)
-    • Tensor Cores FP16 (2× throughput vs FP32 sur Ampere+)
-    • Optimisation du plan d'exécution des kernels CUDA
-    • Réutilisation des buffers mémoire intermédiaires
+  Optimizations applied by TRT:
+    * Conv + BN + activation fusion -> single kernel (Conv-BN-ReLU -> CBR kernel)
+    * FP16 Tensor Cores (2x throughput vs FP32 on Ampere+)
+    * CUDA kernel execution-plan optimization
+    * Reuse of intermediate memory buffers
 
-  min_block_size : nombre minimum d'ops consécutives pour former un bloc TRT.
-    Trop petit → trop de transitions PyTorch↔TRT (overhead).
-    Recommandé : 5 pour modèles de détection (blocs résiduels = 6+ ops).
+  min_block_size: minimum number of consecutive ops to form a TRT block.
+    Too small -> too many PyTorch<->TRT transitions (overhead).
+    Recommended: 5 for detection models (residual blocks = 6+ ops).
 
-Sauvegarde :
-  TRT avec torch.compile ne peut pas être sérialisé directement (l'engine
-  est compilé à la volée au premier appel). Pour sauvegarder un engine TRT
-  persistant, utiliser la variante ExportedProgram (voir save_trt_model()).
+Saving:
+  TRT via torch.compile cannot be serialized directly (the engine is compiled
+  on the fly at the first call). To save a persistent TRT engine, use the
+  ExportedProgram variant (see save_trt_model()).
 """
 
 from __future__ import annotations
@@ -53,27 +53,27 @@ def build_trt_fp16(
     debug: bool = False,
 ) -> nn.Module:
     """
-    Compile le modèle avec TensorRT FP16 via torch.compile.
+    Compile the model with TensorRT FP16 via torch.compile.
 
     Parameters
     ----------
-    model          : nn.Module en mode eval — issu de load_model()
-    min_block_size : minimum d'ops par bloc TRT (5 recommandé pour détection)
-    workspace_gb   : taille max du workspace TRT en Go
-    debug          : afficher les logs TRT (verbose)
+    model          : nn.Module in eval mode -- from load_model()
+    min_block_size : minimum ops per TRT block (5 recommended for detection)
+    workspace_gb   : max TRT workspace size in GB
+    debug          : print TRT logs (verbose)
 
     Returns
     -------
-    nn.Module avec même API que l'original (drop-in replacement).
-    Le premier appel forward déclenche la compilation TRT (warmup long).
+    nn.Module with the same API as the original (drop-in replacement).
+    The first forward call triggers TRT compilation (long warmup).
     """
     try:
         import torch_tensorrt
     except ImportError:
         raise ImportError(
-            "torch-tensorrt non installé.\n"
+            "torch-tensorrt not installed.\n"
             "  pip install torch-tensorrt\n"
-            "  (Colab : !pip install torch-tensorrt)"
+            "  (Colab: !pip install torch-tensorrt)"
         )
 
     _check_cuda()
@@ -93,10 +93,10 @@ def build_trt_fp16(
         },
     )
 
-    print(f"[TRT FP16] Modèle compilé avec torch_tensorrt backend.")
+    print(f"[TRT FP16] Model compiled with torch_tensorrt backend.")
     print(f"  min_block_size={min_block_size}  workspace={workspace_gb:.1f} GB")
-    print("  -> Premier appel forward déclenche la compilation TRT.")
-    print("  -> Inclure dans n_warmup (minimum 3 appels supplémentaires).")
+    print("  -> First forward call triggers TRT compilation.")
+    print("  -> Include in n_warmup (at least 3 extra calls).")
     return trt_model
 
 
@@ -108,14 +108,14 @@ def save_trt_model(
     min_block_size: int = 5,
 ) -> str:
     """
-    Compile et sauvegarde un engine TRT persistant via ExportedProgram.
-    Plus long à construire, mais peut être rechargé sans recompilation.
+    Compile and save a persistent TRT engine via ExportedProgram.
+    Longer to build, but can be reloaded without recompilation.
 
-    sample_input : Tensor[1, 3, H, W] sur CUDA — définit les shapes figées.
+    sample_input: Tensor[1, 3, H, W] on CUDA -- defines the frozen shapes.
 
     Returns
     -------
-    str : chemin du fichier .ts sauvegardé
+    str: path of the saved .ts file
     """
     try:
         import torch_tensorrt
@@ -139,35 +139,35 @@ def save_trt_model(
 
     torch_tensorrt.save(trt_ep, save_path, inputs=[sample_input])
     size_mb = Path(save_path).stat().st_size / 1e6
-    print(f"[TRT FP16] Engine sauvegardé -> {save_path}  ({size_mb:.1f} MB)")
+    print(f"[TRT FP16] Engine saved -> {save_path}  ({size_mb:.1f} MB)")
     return save_path
 
 
 def load_trt_model(path: str) -> nn.Module:
     """
-    Charge un engine TRT sauvegardé avec save_trt_model().
-    Nécessite torch_tensorrt importé pour désérialiser.
+    Load a TRT engine saved with save_trt_model().
+    Requires torch_tensorrt to be imported for deserialization.
     """
     try:
-        import torch_tensorrt  # noqa: F401 — nécessaire pour le désérialiseur
+        import torch_tensorrt  # noqa: F401 -- required for the deserializer
     except ImportError:
         raise ImportError("pip install torch-tensorrt")
 
     model = torch.export.load(path)
-    print(f"[TRT FP16] Engine chargé <- {path}")
+    print(f"[TRT FP16] Engine loaded <- {path}")
     return model
 
 
-# ── Utilitaire ────────────────────────────────────────────────────────────────
+# -- Utility -------------------------------------------------------------------
 
 def _check_cuda() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA non disponible. TensorRT nécessite un GPU NVIDIA."
+            "CUDA not available. TensorRT requires an NVIDIA GPU."
         )
     device_name = torch.cuda.get_device_name(0)
     cc_major, cc_minor = torch.cuda.get_device_capability(0)
-    print(f"[TRT FP16] GPU : {device_name}  (Compute Capability {cc_major}.{cc_minor})")
+    print(f"[TRT FP16] GPU: {device_name}  (Compute Capability {cc_major}.{cc_minor})")
     if cc_major < 7:
-        print("  [!] Tensor Cores FP16 disponibles à partir de Volta (CC 7.0+).")
-        print("  Le modèle compilera mais les gains FP16 seront limités.")
+        print("  [!] FP16 Tensor Cores available from Volta (CC 7.0+).")
+        print("  The model will compile but FP16 gains will be limited.")

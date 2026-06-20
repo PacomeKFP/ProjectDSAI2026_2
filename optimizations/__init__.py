@@ -1,33 +1,33 @@
 """
 optimizations/
-══════════════
-Boîte à outils d'optimisation pour l'inférence GPU des modèles de détection.
+==============
+Optimization toolbox for GPU inference of detection models.
 
-Disponibilité par environnement (voir capability.py pour la détection auto) :
+Availability per environment (see capability.py for auto-detection):
 
   Module / technique      Windows local   Colab (Linux+GPU)
-  ──────────────────────  ──────────────  ─────────────────
-  capability.py           ✓               ✓     (détection d'environnement)
-  fp16_half.py            ✓               ✓     (FP16 autocast, Tensor Cores)
-  torchscript.py          ✓               ✓     (graphe TorchScript + fusion Conv-BN)
-  torch_compile.py        ✓ (cudagraphs)  ✓ (inductor)
-  onnx_export.py          ✓               ✓     (export ONNX)
-  ort_inference.py        ✓               ✓     (ONNX Runtime CUDA EP)
-  tensorrt_fp16.py        ✗               ✓     (TensorRT FP16)
-  tensorrt_int8.py        ✗               ✓     (TensorRT INT8 + calibration)
+  ----------------------  --------------  -----------------
+  capability.py           [OK]               [OK]     (environment detection)
+  fp16_half.py            [OK]               [OK]     (FP16 autocast, Tensor Cores)
+  torchscript.py          [OK]               [OK]     (TorchScript graph + Conv-BN fusion)
+  torch_compile.py        [OK] (cudagraphs)  [OK] (inductor)
+  onnx_export.py          [OK]               [OK]     (ONNX export)
+  ort_inference.py        [OK]               [OK]     (ONNX Runtime CUDA EP)
+  tensorrt_fp16.py        [X]               [OK]     (TensorRT FP16)
+  tensorrt_int8.py        [X]               [OK]     (TensorRT INT8 + calibration)
 
-Chaque fonction retourne un modèle qui préserve l'API d'origine
-(même signature forward) → drop-in pour benchmark_model() et run_map_evaluation().
+Each function returns a model that preserves the original API (same forward
+signature) -> drop-in for benchmark_model() and run_map_evaluation().
 """
 
-# Détection d'environnement — toujours disponible
+# Environment detection -- always available
 from .capability import (
     detect, print_report, Capabilities,
     has_triton, has_torch_tensorrt, has_onnx, has_onnxruntime,
     default_compile_backend,
 )
 
-# Techniques cross-platform (Windows + Colab)
+# Cross-platform techniques (Windows + Colab)
 from .fp16_half     import to_fp16_autocast, to_fp16_half, AutocastModel
 from .torchscript   import (
     optimize_with_torchscript, save_torchscript, load_torchscript,
@@ -36,14 +36,14 @@ from .torch_compile import compile_model, save_compiled
 from .onnx_export   import export_to_onnx, check_onnx, validate_outputs
 from .ort_inference import build_ort_model, ORTModel
 
-# Techniques Colab/Linux uniquement — imports légers (deps chargées à l'appel)
+# Colab/Linux-only techniques -- lightweight imports (deps loaded on call)
 from .tensorrt_fp16 import build_trt_fp16, load_trt_model
 from .tensorrt_int8 import build_trt_int8
 
-# Chemins de sortie (préfixe Drive sur Colab)
+# Output paths (Drive prefix on Colab)
 from .paths import out_path, ensure_dir, set_prefix, project_prefix, describe as describe_paths
 
-# Optimisation par zone et sous-zone (consciente de l'architecture)
+# Architecture-aware zone and sub-zone optimization
 from .zones import (
     apply_zone_optimization, apply_subzone_plan, get_static_zone, get_subzone,
     get_coarse_zones, capture_subzone_inputs, SUBZONES,
@@ -51,7 +51,7 @@ from .zones import (
     opt_trt_fp16, opt_trt_fp16_folded, opt_trt_int8,
 )
 
-# Orchestrateur
+# Orchestrator
 from .runner import (
     OptimizationRunner, RunConfig, ModelSpec, VariantSpec,
     DEFAULT_VARIANTS, FULL_VARIANTS,

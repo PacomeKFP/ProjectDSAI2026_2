@@ -1,49 +1,50 @@
 """
 optimizations/torchscript.py
-═════════════════════════════
-Compilation de graphe via TorchScript — fonctionne sur Windows ET Colab.
+=============================
+Graph compilation via TorchScript -- works on Windows AND Colab.
 
-Dépendances :
-  torch uniquement (natif, aucune dépendance externe, pas de Triton).
+Dependencies:
+  torch only (built-in, no external dependency, no Triton).
 
-Ce que ça fait :
-  TorchScript transforme un nn.Module Python dynamique en un graphe statique
-  sérialisable et optimisable. C'est la voie de « compilation de graphe »
-  disponible partout (contrairement à torch.compile/inductor qui exige Triton).
+What it does:
+  TorchScript turns a dynamic Python nn.Module into a static, serializable,
+  optimizable graph. This is the "graph compilation" path available
+  everywhere (unlike torch.compile/inductor which requires Triton).
 
-  Trois étapes :
-    1. CAPTURE du graphe
-       • torch.jit.script  : analyse le code Python source → graphe (gère le
-         contrôle de flux : if/for/while). Voie privilégiée pour les modèles
-         torchvision (écrits pour être scriptables).
-       • torch.jit.trace   : exécute le modèle sur un exemple et enregistre les
-         ops rencontrées. Plus simple mais ne capture pas le contrôle de flux
-         dépendant des données (les branches non prises sont perdues).
+  Three steps:
+    1. GRAPH CAPTURE
+       * torch.jit.script  : analyzes the Python source code -> graph (handles
+         control flow: if/for/while). Preferred path for torchvision models
+         (written to be scriptable).
+       * torch.jit.trace   : runs the model on a sample input and records the
+         ops encountered. Simpler but does not capture data-dependent control
+         flow (untaken branches are lost).
 
     2. FREEZE (torch.jit.freeze)
-       Inline les poids comme constantes, supprime les attributs inutiles, et
-       permet des optimisations inter-procédurales (constant folding).
+       Inlines weights as constants, removes useless attributes, and enables
+       inter-procedural optimizations (constant folding).
 
     3. OPTIMIZE_FOR_INFERENCE (torch.jit.optimize_for_inference)
-       Applique des passes spécifiques inférence :
-         • fusion Conv+BatchNorm (les stats BN sont figées → repliées dans la conv)
-         • fusion Conv+ReLU via le fuser NNC
-         • élimination de code mort, peephole optimizations
+       Applies inference-specific passes:
+         * Conv+BatchNorm fusion (BN stats are frozen -> folded into the conv)
+         * Conv+ReLU fusion via the NNC fuser
+         * dead-code elimination, peephole optimizations
 
-  Différence avec TensorRT :
-    TorchScript fusionne au niveau du graphe PyTorch (NNC/nvFuser) mais reste
-    dans le runtime PyTorch. TRT recompile en kernels CUDA natifs. TorchScript
-    donne des gains plus modestes (×1.1–1.4) mais sans dépendance et partout.
+  Difference vs TensorRT:
+    TorchScript fuses at the PyTorch graph level (NNC/nvFuser) but stays in
+    the PyTorch runtime. TRT recompiles into native CUDA kernels.
+    TorchScript yields more modest gains (x1.1-1.4) but with no dependency
+    and works everywhere.
 
-  Fusion Conv+BN :
-    C'est LE gain principal de optimize_for_inference. En inférence, BatchNorm
-    devient une transformation affine constante (y = γ·(x−μ)/σ + β) qui peut être
-    repliée dans les poids de la conv précédente → une couche au lieu de deux.
-    Visible dans le rapport : les modules BatchNorm2d « disparaissent » du graphe.
+  Conv+BN fusion:
+    This is THE main gain of optimize_for_inference. In inference, BatchNorm
+    becomes a constant affine transform (y = gamma*(x-mu)/sigma + beta) that can be
+    folded into the preceding conv's weights -> one layer instead of two.
+    Visible in the report: BatchNorm2d modules "disappear" from the graph.
 
-Sauvegarde :
-  Le graphe TorchScript est sérialisable (.ts) et rechargeable sans le code
-  source Python original → portable entre machines (contrairement aux engines TRT).
+Saving:
+  The TorchScript graph is serializable (.ts) and reloadable without the
+  original Python source code -> portable across machines (unlike TRT engines).
 """
 
 from __future__ import annotations
@@ -63,96 +64,97 @@ def optimize_with_torchscript(
     optimize: bool = True,
 ) -> nn.Module:
     """
-    Compile le modèle en TorchScript + freeze + optimize_for_inference.
+    Compile the model into TorchScript + freeze + optimize_for_inference.
 
     Parameters
     ----------
-    model         : nn.Module en mode eval
-    example_input : entrée exemple pour le tracing (requis si prefer="trace"
-                    ou si le scripting échoue). Format attendu par le modèle :
-                    List[Tensor] pour RetinaNet, Tensor[B,C,H,W] pour EfficientDet.
-    prefer        : "script" (défaut, robuste pour torchvision) ou "trace"
-    freeze        : appliquer torch.jit.freeze (recommandé)
-    optimize      : appliquer optimize_for_inference (fusion Conv+BN, etc.)
+    model         : nn.Module in eval mode
+    example_input : example input for tracing (required if prefer="trace"
+                    or if scripting fails). Format expected by the model:
+                    List[Tensor] for RetinaNet, Tensor[B,C,H,W] for EfficientDet.
+    prefer        : "script" (default, robust for torchvision) or "trace"
+    freeze        : apply torch.jit.freeze (recommended)
+    optimize      : apply optimize_for_inference (Conv+BN fusion, etc.)
 
     Returns
     -------
-    nn.Module TorchScript — même API que l'original.
-    Si la compilation échoue, retourne le modèle original avec un avertissement.
+    TorchScript nn.Module -- same API as the original.
+    If compilation fails, raises RuntimeError (fail-loud).
     """
     model.eval()
     ts_model = None
 
-    # ── 1. Capture du graphe ──────────────────────────────────────────────────
+    # -- 1. Graph capture ------------------------------------------------------
     if prefer == "script":
         try:
             ts_model = torch.jit.script(model)
-            print("[TorchScript] [OK] Graphe capturé via torch.jit.script")
+            print("[TorchScript] [OK] Graph captured via torch.jit.script")
         except Exception as e:
-            print(f"[TorchScript] script a échoué ({type(e).__name__}) — fallback trace")
+            print(f"[TorchScript] script failed ({type(e).__name__}) -- falling back to trace")
             ts_model = _try_trace(model, example_input)
     else:
         ts_model = _try_trace(model, example_input)
 
     if ts_model is None:
-        # FAIL-LOUD : ne pas retomber silencieusement sur l'eager — sinon le runner
-        # rapporterait un faux gain (le bench mesurerait le modèle non-compilé alors
-        # qu'il croit mesurer TorchScript). Le try/except du runner marquera FAILED.
+        # FAIL-LOUD: do not silently fall back to eager -- otherwise the runner
+        # would report a fake gain (the bench would measure the non-compiled
+        # model while believing it measures TorchScript). The runner's
+        # try/except will mark this FAILED.
         raise RuntimeError(
-            "TorchScript : ni script ni trace n'ont abouti — compilation impossible."
+            "TorchScript: neither script nor trace succeeded -- compilation impossible."
         )
 
-    # ── 2. Freeze ─────────────────────────────────────────────────────────────
+    # -- 2. Freeze -------------------------------------------------------------
     if freeze:
         try:
             ts_model = torch.jit.freeze(ts_model)
-            print("[TorchScript] [OK] Freeze appliqué (poids inlinés, constant folding)")
+            print("[TorchScript] [OK] Freeze applied (weights inlined, constant folding)")
         except Exception as e:
-            print(f"[TorchScript] freeze ignoré ({type(e).__name__})")
+            print(f"[TorchScript] freeze skipped ({type(e).__name__})")
 
-    # ── 3. Optimize for inference ─────────────────────────────────────────────
+    # -- 3. Optimize for inference ---------------------------------------------
     if optimize:
         try:
             ts_model = torch.jit.optimize_for_inference(ts_model)
-            print("[TorchScript] [OK] optimize_for_inference (fusion Conv+BN+ReLU)")
+            print("[TorchScript] [OK] optimize_for_inference (Conv+BN+ReLU fusion)")
         except Exception as e:
-            print(f"[TorchScript] optimize_for_inference ignoré ({type(e).__name__})")
+            print(f"[TorchScript] optimize_for_inference skipped ({type(e).__name__})")
 
-    print("  -> Le premier appel forward finalise les optimisations JIT (warmup).")
+    print("  -> The first forward call finalizes JIT optimizations (warmup).")
     return ts_model
 
 
 def _try_trace(model: nn.Module, example_input) -> Optional[nn.Module]:
-    """Tente un torch.jit.trace avec l'exemple fourni."""
+    """Attempt a torch.jit.trace with the provided example."""
     if example_input is None:
-        print("[TorchScript] trace impossible : example_input manquant.")
+        print("[TorchScript] trace impossible: example_input missing.")
         return None
     try:
-        # strict=False : tolère les sorties dict/list (détection)
+        # strict=False: tolerates dict/list outputs (detection)
         traced = torch.jit.trace(model, example_input, strict=False)
-        print("[TorchScript] [OK] Graphe capturé via torch.jit.trace")
+        print("[TorchScript] [OK] Graph captured via torch.jit.trace")
         return traced
     except Exception as e:
-        print(f"[TorchScript] trace a échoué ({type(e).__name__}: {e})")
+        print(f"[TorchScript] trace failed ({type(e).__name__}: {e})")
         return None
 
 
 def save_torchscript(model: nn.Module, path: str) -> str:
     """
-    Sauvegarde un modèle TorchScript (.ts) — portable entre machines.
+    Save a TorchScript model (.ts) -- portable across machines.
     """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if not isinstance(model, torch.jit.ScriptModule) and not hasattr(model, "save"):
-        raise TypeError("Le modèle n'est pas un ScriptModule — compiler d'abord.")
+        raise TypeError("The model is not a ScriptModule -- compile it first.")
     torch.jit.save(model, path)
     size_mb = Path(path).stat().st_size / 1e6
-    print(f"[TorchScript] Sauvegardé -> {path}  ({size_mb:.1f} MB)")
+    print(f"[TorchScript] Saved -> {path}  ({size_mb:.1f} MB)")
     return path
 
 
 def load_torchscript(path: str, device: str = "cuda") -> nn.Module:
-    """Charge un modèle TorchScript sauvegardé (.ts)."""
+    """Load a saved TorchScript model (.ts)."""
     model = torch.jit.load(path, map_location=device)
     model.eval()
-    print(f"[TorchScript] Chargé <- {path}")
+    print(f"[TorchScript] Loaded <- {path}")
     return model

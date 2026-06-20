@@ -1,31 +1,31 @@
 """
 utils/benchmark.py
-──────────────────
-Outils de mesure de vitesse GPU pour les modèles de détection.
+------------------
+GPU speed measurement tools for detection models.
 
-  benchmark_model(...)   — mesure le temps GPU end-to-end du forward
+  benchmark_model(...)   -- measures end-to-end GPU time of the forward pass
                            via CUDA Events (mean_ms, std_ms, fps)
 
-  ModuleBenchmark        — mesure optionnelle par module feuille
-                           (Conv2d, BatchNorm2d, ReLU, …) via hooks
-                           forward_pre / forward, à passer en paramètre
-                           de benchmark_model()
+  ModuleBenchmark        -- optional per-leaf-module measurement
+                           (Conv2d, BatchNorm2d, ReLU, ...) via forward_pre /
+                           forward hooks, passed as a parameter to
+                           benchmark_model()
 
-Ces outils mesurent la VITESSE — ils ne génèrent pas de trace ni de
-décomposition des opérations ATen. Pour l'inspection et la visualisation,
-voir profiler/pytorch_profiler.py (torch.profiler + export Chrome/Perfetto).
+These tools measure SPEED -- they do not generate a trace nor a breakdown of
+ATen operations. For inspection and visualization, see
+profiler/pytorch_profiler.py (torch.profiler + Chrome/Perfetto export).
 
-Pourquoi CUDA Events et non time.time() ?
-  PyTorch dispatche les kernels de façon asynchrone : le CPU revient avant
-  que le GPU ait terminé. time.time() mesurerait le dispatch CPU, pas le GPU.
-  CUDA Events timestampent directement dans le stream GPU et donnent le temps
-  d'exécution réel sur le silicium.
+Why CUDA Events and not time.time()?
+  PyTorch dispatches kernels asynchronously: the CPU returns before the GPU
+  has finished. time.time() would measure the CPU dispatch, not the GPU.
+  CUDA Events timestamp directly inside the GPU stream and yield the real
+  on-silicon execution time.
 
-Caveat ModuleBenchmark : somme des modules ≠ temps total
-  CUDA peut exécuter des kernels en parallèle (overlap entre BN et conv
-  suivant, branches FPN, etc.). La somme donne le travail total théorique ;
-  benchmark_model() donne le vrai temps mur GPU. L'écart mesure le
-  parallélisme interne du modèle.
+ModuleBenchmark caveat: sum of modules != total time
+  CUDA can execute kernels in parallel (overlap between BN and the following
+  conv, FPN branches, etc.). The sum gives the theoretical total work;
+  benchmark_model() gives the actual GPU wall-clock time. The gap measures
+  the model's internal parallelism.
 """
 import gc
 from collections import defaultdict
@@ -41,10 +41,10 @@ try:
 except ImportError:
     _HAS_PSUTIL = False
 
-from utils.tqdm_compat import tqdm   # barre de progression (no-op si absent)
+from utils.tqdm_compat import tqdm   # progress bar (no-op if absent)
 
 
-# ── Utilitaire mémoire ────────────────────────────────────────────────────────
+# -- Memory helper -------------------------------------------------------------
 
 def estimate_batch_size(device="cuda", image_h=640, image_w=640,
                         safety=0.3, max_batch=200):
@@ -58,23 +58,23 @@ def estimate_batch_size(device="cuda", image_h=640, image_w=640,
     return max(1, min(int(free_bytes * safety) // bytes_per_img, max_batch))
 
 
-# ── ModuleBenchmark ───────────────────────────────────────────────────────────
+# -- ModuleBenchmark -----------------------------------------------------------
 
 class ModuleBenchmark:
     """
-    Mesure le temps GPU de chaque module feuille d'un modèle via CUDA Events.
+    Measures the GPU time of every leaf module of a model via CUDA Events.
 
-    Un module est une feuille s'il n'a aucun sous-module enfant
-    (Conv2d, BatchNorm2d, ReLU, Linear, SiLU, MaxPool2d, …).
+    A module is a leaf if it has no child sub-module
+    (Conv2d, BatchNorm2d, ReLU, Linear, SiLU, MaxPool2d, ...).
 
-    Usage — passer une instance à benchmark_model() :
+    Usage -- pass an instance to benchmark_model():
 
         mb = ModuleBenchmark()
         result = benchmark_model(model, data, preprocess, collate,
                                  module_benchmark=mb)
-        result["modules"]   # DataFrame trié par mean_ms décroissant
+        result["modules"]   # DataFrame sorted by mean_ms descending
 
-    Usage standalone :
+    Standalone usage:
 
         mb = ModuleBenchmark()
         mb.attach(model)
@@ -88,11 +88,11 @@ class ModuleBenchmark:
 
     def __init__(self):
         self._hooks   = []
-        self._events  = {}                    # label → (start_event, end_event)
-        self._records = defaultdict(list)     # label → [ms, ms, ...]
+        self._events  = {}                    # label -> (start_event, end_event)
+        self._records = defaultdict(list)     # label -> [ms, ms, ...]
 
     def attach(self, model: nn.Module):
-        """Attache des CUDA Events sur tous les modules feuilles du modèle."""
+        """Attach CUDA Events on every leaf module of the model."""
         for name, module in model.named_modules():
             if len(list(module.children())) > 0:
                 continue
@@ -117,8 +117,8 @@ class ModuleBenchmark:
 
     def collect(self):
         """
-        Lit le temps GPU de chaque module pour l'itération courante.
-        Doit être appelé APRÈS torch.cuda.synchronize().
+        Read the GPU time of each module for the current iteration.
+        Must be called AFTER torch.cuda.synchronize().
         """
         for label, (start, end) in self._events.items():
             try:
@@ -129,25 +129,25 @@ class ModuleBenchmark:
                 pass
 
     def detach(self):
-        """Supprime tous les hooks."""
+        """Remove all hooks."""
         for h in self._hooks:
             h.remove()
         self._hooks.clear()
 
     def summary(self) -> pd.DataFrame:
         """
-        Retourne un DataFrame avec une ligne par module feuille :
+        Return a DataFrame with one row per leaf module:
 
-          module         — chemin hiérarchique complet
-          type           — classe PyTorch (Conv2d, BatchNorm2d, …)
-          root_component — premier segment du chemin (backbone, fpn, head, …)
-          mean_ms        — moyenne GPU sur toutes les itérations mesurées
-          std_ms         — écart-type
+          module         -- full hierarchical path
+          type           -- PyTorch class (Conv2d, BatchNorm2d, ...)
+          root_component -- first path segment (backbone, fpn, head, ...)
+          mean_ms        -- GPU mean across all measured iterations
+          std_ms         -- standard deviation
           min_ms / max_ms
-          pct_sum        — % du temps cumulé de tous les modules
-          n_samples      — nombre d'itérations collectées
+          pct_sum        -- % of the cumulative time of all modules
+          n_samples      -- number of collected iterations
 
-        Trié par mean_ms décroissant.
+        Sorted by mean_ms descending.
         """
         rows = []
         for label, times in self._records.items():
@@ -176,7 +176,7 @@ class ModuleBenchmark:
         return df
 
 
-# ── benchmark_model ───────────────────────────────────────────────────────────
+# -- benchmark_model -----------------------------------------------------------
 
 def benchmark_model(
     model,
@@ -189,25 +189,26 @@ def benchmark_model(
     module_benchmark=None,
 ):
     """
-    Mesure le temps GPU end-to-end du forward (batch_size=1).
+    Measure end-to-end GPU forward time (batch_size=1).
 
-    Protocole :
-      - n_warmup itérations non mesurées (chauffe GPU + caches)
-      - n_measure itérations mesurées avec CUDA Events
-      - H2D exclu : synchronize() avant starter.record()
+    Protocol:
+      - n_warmup unmeasured iterations (warm up GPU + caches)
+      - n_measure iterations measured with CUDA Events
+      - H2D excluded: synchronize() before starter.record()
 
     Parameters
     ----------
     module_benchmark : ModuleBenchmark | None
-        Si fourni, mesure également le temps de chaque module feuille.
-        Les hooks sont actifs dès le warmup (pour chauffer les caches)
-        mais collect() n'est appelé que pendant la phase de mesure.
+        If provided, also measures the time of every leaf module. Hooks are
+        active from the warmup (to warm caches up) but collect() is only
+        called during the measurement phase.
 
-    Retourne
-    --------
+    Returns
+    -------
     dict :
       mean_ms, std_ms, min_ms, max_ms, fps
-      + "modules" (DataFrame ModuleBenchmark.summary()) si module_benchmark fourni
+      + "modules" (DataFrame from ModuleBenchmark.summary()) if
+        module_benchmark is provided
     """
     if len(data) < n_warmup + n_measure:
         raise ValueError(

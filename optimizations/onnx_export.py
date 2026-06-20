@@ -1,33 +1,33 @@
 """
 optimizations/onnx_export.py
-═════════════════════════════
-Export ONNX — porte d'entrée vers TensorRT et ONNX Runtime.
+=============================
+ONNX export -- gateway to TensorRT and ONNX Runtime.
 
-Dépendances :
+Dependencies:
   onnx >= 1.14          pip install onnx
   onnxruntime-gpu       pip install onnxruntime-gpu
-  onnxsim (optionnel)   pip install onnxsim   ← simplifie le graphe exporté
+  onnxsim (optional)    pip install onnxsim   <- simplifies the exported graph
 
-Ce que ça fait :
-  torch.onnx.export trace le graphe PyTorch et le sérialise au format ONNX.
-  Le graphe ONNX est ensuite utilisé par :
-    - TensorRT (via onnx_parser) pour compiler un engine optimisé
-    - ONNX Runtime (ort_inference.py) pour une inférence cross-platform
-    - Netron (netron.app) pour visualiser l'architecture
+What it does:
+  torch.onnx.export traces the PyTorch graph and serializes it as ONNX.
+  The ONNX graph is then used by:
+    - TensorRT (via onnx_parser) to compile an optimized engine
+    - ONNX Runtime (ort_inference.py) for cross-platform inference
+    - Netron (netron.app) to visualize the architecture
 
-Subtilités détection :
-  Les modèles de détection ont des sorties à taille variable (nombre de
-  détections). Deux stratégies :
+Detection subtleties:
+  Detection models have variable-sized outputs (number of detections). Two
+  strategies:
 
-  A. export_backbone_only() — exporte uniquement backbone + FPN + tête
-     (sorties tenseurs fixes par FPN level). Post-processing en Python.
-     ✓ Compatible ONNX, TRT, ORT sans modifications.
-     Utilisé par ort_inference.py pour l'inférence complète.
+  A. export_backbone_only() -- exports only backbone + FPN + head
+     (fixed-tensor outputs per FPN level). Post-processing stays in Python.
+     [OK] Compatible with ONNX, TRT, ORT without modification.
+     Used by ort_inference.py for full inference.
 
-  B. export_full_detection() — tente d'exporter le modèle complet avec NMS.
-     ✓ Fonctionne pour EfficientDet (sortie [B, N, 6]).
-     ✗ Difficile pour RetinaNet torchvision (sortie List[Dict]).
-     Utilisé seulement si le modèle expose une API batched.
+  B. export_full_detection() -- tries to export the full model with NMS.
+     [OK] Works for EfficientDet (output [B, N, 6]).
+     [X] Hard for torchvision RetinaNet (output List[Dict]).
+     Used only if the model exposes a batched API.
 """
 
 from __future__ import annotations
@@ -39,23 +39,23 @@ import torch
 import torch.nn as nn
 
 
-# ── Export backbone uniquement (RetinaNet + EfficientDet) ─────────────────────
+# -- Backbone-only export (RetinaNet + EfficientDet) ---------------------------
 
 class _BackboneFPNWrapper(nn.Module):
-    """Extrait backbone + FPN de RetinaNet torchvision pour export ONNX propre."""
+    """Extract backbone + FPN from torchvision RetinaNet for a clean ONNX export."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
-        # RetinaNet torchvision : model.backbone inclut backbone + FPN
+        # torchvision RetinaNet: model.backbone includes backbone + FPN
         if hasattr(model, "backbone"):
             self.backbone = model.backbone
             self._mode = "retinanet"
         elif hasattr(model, "model") and hasattr(model.model, "backbone"):
-            # effdet wrap : model.model.backbone
+            # effdet wrap: model.model.backbone
             self.backbone = model.model.backbone
             self._mode = "effdet"
         else:
-            raise ValueError("Architecture non reconnue — backbone introuvable.")
+            raise ValueError("Unrecognized architecture -- backbone not found.")
 
     def forward(self, x: torch.Tensor):
         feats = self.backbone(x)
@@ -75,20 +75,20 @@ def export_backbone_only(
     simplify: bool = False,
 ) -> str:
     """
-    Exporte uniquement le backbone + FPN vers ONNX (sorties fixes — TRT-ready).
+    Export only the backbone + FPN to ONNX (fixed outputs -- TRT-ready).
 
     Parameters
     ----------
     model       : nn.Module (load_model())
-    output_path : chemin .onnx
-    image_size  : (H, W) — résolution d'entrée fixe pour l'export
-    opset       : version opset ONNX (17 recommandé)
-    device      : device sur lequel faire le trace
-    simplify    : simplifier le graphe avec onnxsim (recommandé)
+    output_path : .onnx path
+    image_size  : (H, W) -- fixed input resolution for the export
+    opset       : ONNX opset version (17 recommended)
+    device      : device used for tracing
+    simplify    : simplify the graph with onnxsim (recommended)
 
     Returns
     -------
-    str : chemin du fichier .onnx
+    str: path of the .onnx file
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     model.eval()
@@ -119,12 +119,12 @@ def export_backbone_only(
         _simplify(output_path)
 
     size_mb = Path(output_path).stat().st_size / 1e6
-    print(f"[ONNX] backbone exporté -> {output_path}  ({size_mb:.1f} MB)")
-    print(f"  outputs : {output_names}")
+    print(f"[ONNX] backbone exported -> {output_path}  ({size_mb:.1f} MB)")
+    print(f"  outputs: {output_names}")
     return output_path
 
 
-# ── Export modèle complet (EfficientDet — sortie [B, N, 6]) ──────────────────
+# -- Full-model export (EfficientDet -- output [B, N, 6]) ----------------------
 
 def export_full_detection(
     model: nn.Module,
@@ -135,13 +135,13 @@ def export_full_detection(
     simplify: bool = False,
 ) -> str:
     """
-    Exporte le modèle complet de détection (NMS inclus) vers ONNX.
-    Fonctionne pour EfficientDet (sortie Tensor [B, N, 6]).
-    Pour RetinaNet torchvision, utiliser export_backbone_only().
+    Export the full detection model (NMS included) to ONNX.
+    Works for EfficientDet (Tensor[B, N, 6] output).
+    For torchvision RetinaNet, use export_backbone_only().
 
     Returns
     -------
-    str : chemin du fichier .onnx
+    str: path of the .onnx file
     """
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     model.eval()
@@ -175,11 +175,11 @@ def export_full_detection(
         _simplify(output_path)
 
     size_mb = Path(output_path).stat().st_size / 1e6
-    print(f"[ONNX] modèle complet exporté -> {output_path}  ({size_mb:.1f} MB)")
+    print(f"[ONNX] full model exported -> {output_path}  ({size_mb:.1f} MB)")
     return output_path
 
 
-# ── Alias générique ───────────────────────────────────────────────────────────
+# -- Generic alias -------------------------------------------------------------
 
 def export_to_onnx(
     model: nn.Module,
@@ -189,26 +189,26 @@ def export_to_onnx(
     **kwargs,
 ) -> str:
     """
-    Point d'entrée unifié. backbone_only=True est le défaut recommandé
-    (compatible avec tous les modèles).
+    Unified entry point. backbone_only=True is the recommended default
+    (compatible with every model).
     """
     if backbone_only:
         return export_backbone_only(model, output_path, image_size, **kwargs)
     return export_full_detection(model, output_path, image_size, **kwargs)
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+# -- Validation ----------------------------------------------------------------
 
 def check_onnx(onnx_path: str) -> bool:
-    """Vérifie l'intégrité structurelle du graphe ONNX."""
+    """Check the structural integrity of the ONNX graph."""
     import onnx
     m = onnx.load(onnx_path)
     try:
         onnx.checker.check_model(m)
-        print(f"[ONNX] [OK] Validation OK — {onnx_path}")
+        print(f"[ONNX] [OK] Validation OK -- {onnx_path}")
         return True
     except onnx.checker.ValidationError as e:
-        print(f"[ONNX] [X] Validation FAILED — {e}")
+        print(f"[ONNX] [X] Validation FAILED -- {e}")
         return False
 
 
@@ -220,8 +220,8 @@ def validate_outputs(
     atol: float = 1e-3,
 ) -> bool:
     """
-    Compare numériquement les sorties PyTorch et ONNX Runtime sur backbone_only.
-    Utile pour détecter des régressions numériques à l'export.
+    Numerically compare PyTorch and ONNX Runtime outputs on backbone_only.
+    Useful to detect numerical regressions at export time.
     """
     import onnxruntime as ort
     import numpy as np
@@ -242,16 +242,16 @@ def validate_outputs(
     ok = True
     for i, (pt, ort_o) in enumerate(zip(pt_outs, ort_outs)):
         diff = np.abs(pt - ort_o).max()
-        status = "✓" if diff <= atol else "✗"
+        status = "[OK]" if diff <= atol else "[X]"
         print(f"  feat_{i}: max_diff={diff:.2e}  {status}")
         if diff > atol:
             ok = False
 
-    print(f"[ONNX] Validation numérique : {'OK' if ok else 'FAILED'}")
+    print(f"[ONNX] Numerical validation: {'OK' if ok else 'FAILED'}")
     return ok
 
 
-# ── Utilitaire privé ─────────────────────────────────────────────────────────
+# -- Private utility ----------------------------------------------------------
 
 def _simplify(path: str) -> None:
     try:
@@ -259,8 +259,8 @@ def _simplify(path: str) -> None:
         m, ok = onnxsim.simplify(onnx.load(path))
         if ok:
             onnx.save(m, path)
-            print("[ONNX] Graphe simplifié avec onnxsim [OK]")
+            print("[ONNX] Graph simplified with onnxsim [OK]")
         else:
-            print("[ONNX] onnxsim n'a pas pu simplifier le graphe")
+            print("[ONNX] onnxsim could not simplify the graph")
     except ImportError:
-        print("[ONNX] onnxsim non installé — skip")
+        print("[ONNX] onnxsim not installed -- skipping")

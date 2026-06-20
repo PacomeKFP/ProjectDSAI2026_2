@@ -1,29 +1,29 @@
 """
 optimizations/capability.py
-════════════════════════════
-Détection centralisée des capacités de l'environnement.
+============================
+Centralized detection of environment capabilities.
 
-Chaque technique d'optimisation a des dépendances différentes et n'est pas
-disponible partout. Ce module centralise la détection pour que le notebook
-et les modules d'optimisation partagent une seule source de vérité.
+Each optimization technique has different dependencies and is not available
+everywhere. This module centralizes detection so that the notebook and the
+optimization modules share a single source of truth.
 
-Matrice de disponibilité (typique) :
+Typical availability matrix:
 
-  Technique              Windows local   Colab (Linux+GPU)   Dépend de
-  ─────────────────────  ──────────────  ──────────────────  ──────────────────
-  FP16 autocast          ✓               ✓                   CUDA (Tensor Cores)
-  TorchScript            ✓               ✓                   torch (natif)
-  torch.compile cudagraphs ✓             ✓                   CUDA
-  torch.compile inductor  ✗ (pas Triton) ✓                   triton
-  ONNX export            ✓               ✓                   onnx
-  ONNX Runtime           ✓               ✓                   onnxruntime-gpu
-  TensorRT FP16/INT8     ✗               ✓                   torch-tensorrt
+  Technique              Windows local   Colab (Linux+GPU)   Depends on
+  ---------------------  --------------  ------------------  ------------------
+  FP16 autocast          [OK]               [OK]                   CUDA (Tensor Cores)
+  TorchScript            [OK]               [OK]                   torch (built-in)
+  torch.compile cudagraphs [OK]             [OK]                   CUDA
+  torch.compile inductor  [X] (no Triton)  [OK]                   triton
+  ONNX export            [OK]               [OK]                   onnx
+  ONNX Runtime           [OK]               [OK]                   onnxruntime-gpu
+  TensorRT FP16/INT8     [X]               [OK]                   torch-tensorrt
 
-Note : torch.compile a deux backends pertinents ici :
-  - inductor  : génère des kernels Triton fusionnés (le plus rapide, mais Triton
-                n'est pas packagé pour Windows par défaut)
-  - cudagraphs: capture le graphe CUDA pour éliminer l'overhead de lancement
-                des kernels (pas de codegen → aucune dépendance Triton)
+Note: torch.compile has two relevant backends here:
+  - inductor  : generates fused Triton kernels (the fastest, but Triton is
+                not packaged for Windows by default)
+  - cudagraphs: captures the CUDA graph to remove the kernel-launch overhead
+                (no codegen -> no Triton dependency)
 """
 
 from __future__ import annotations
@@ -36,29 +36,29 @@ from typing import Dict
 import torch
 
 
-# ── Marques d'état tolérantes à l'encodage ────────────────────────────────────
-# Jupyter est en UTF-8 (✓/✗ OK). Certains terminaux Windows (cp1252) ne savent
-# pas encoder ces caractères → on détecte et on bascule sur des marques ASCII.
+# -- Encoding-tolerant status marks --------------------------------------------
+# Jupyter is UTF-8 ([OK]/[X] OK). Some Windows terminals (cp1252) cannot encode
+# these characters -> we detect and fall back to ASCII marks.
 
 def _supports_unicode() -> bool:
     enc = getattr(sys.stdout, "encoding", None) or ""
     try:
-        "✓✗".encode(enc)
+        "[OK][X]".encode(enc)
         return True
     except (UnicodeEncodeError, LookupError, TypeError):
         return False
 
 
 _UNI = _supports_unicode()
-_OK  = "✓" if _UNI else "[OK]"
-_NO  = "✗" if _UNI else "[--]"
+_OK  = "[OK]" if _UNI else "[OK]"
+_NO  = "[X]" if _UNI else "[--]"
 
 
 def has_triton() -> bool:
-    """True si Triton est installé et utilisable (backend inductor de torch.compile)."""
+    """True if Triton is installed and usable (inductor backend of torch.compile)."""
     try:
         import triton  # noqa: F401
-        # torch expose aussi un check qui vérifie la compatibilité GPU
+        # torch also exposes a check that verifies GPU compatibility
         from torch.utils._triton import has_triton as _torch_has_triton
         return bool(_torch_has_triton())
     except Exception:
@@ -70,7 +70,7 @@ def has_triton() -> bool:
 
 
 def has_torch_tensorrt() -> bool:
-    """True si torch-tensorrt est importable ET un GPU CUDA est présent."""
+    """True if torch-tensorrt is importable AND a CUDA GPU is present."""
     if not torch.cuda.is_available():
         return False
     try:
@@ -98,10 +98,10 @@ def has_onnxruntime() -> bool:
 
 def default_compile_backend() -> str:
     """
-    Backend torch.compile recommandé selon l'environnement.
-      - "inductor"  si Triton disponible (fusion Triton complète)
-      - "cudagraphs" sinon, si CUDA disponible (capture de graphe, sans Triton)
-      - "eager"     en dernier recours (aucune accélération réelle)
+    Recommended torch.compile backend depending on the environment.
+      - "inductor"   if Triton is available (full Triton fusion)
+      - "cudagraphs" otherwise, if CUDA is available (graph capture, no Triton)
+      - "eager"      as a last resort (no real acceleration)
     """
     if has_triton():
         return "inductor"
@@ -112,7 +112,7 @@ def default_compile_backend() -> str:
 
 @dataclass
 class Capabilities:
-    """Instantané des capacités de l'environnement courant."""
+    """Snapshot of the current environment's capabilities."""
     platform:        str
     is_colab:        bool
     cuda:            bool
@@ -126,9 +126,9 @@ class Capabilities:
     flags: Dict[str, bool] = field(default_factory=dict)
 
     def matrix(self) -> str:
-        """Tableau lisible des techniques disponibles."""
-        def mark(ok): return f"{_OK} disponible" if ok else f"{_NO} indisponible"
-        inductor_label = "  - inductor (Triton)" if not _UNI else "  └ inductor (Triton)"
+        """Readable table of available techniques."""
+        def mark(ok): return f"{_OK} available" if ok else f"{_NO} unavailable"
+        inductor_label = "  - inductor (Triton)" if not _UNI else "  + inductor (Triton)"
         rows = [
             ("FP16 autocast",          self.cuda),
             ("TorchScript",            True),
@@ -144,13 +144,13 @@ class Capabilities:
 
 
 def detect() -> Capabilities:
-    """Construit l'instantané des capacités de l'environnement courant."""
+    """Build a snapshot of the current environment's capabilities."""
     cuda = torch.cuda.is_available()
     caps = Capabilities(
         platform        = platform.system(),
         is_colab        = "google.colab" in sys.modules,
         cuda            = cuda,
-        gpu_name        = torch.cuda.get_device_name(0) if cuda else "—",
+        gpu_name        = torch.cuda.get_device_name(0) if cuda else "--",
         torch_version   = torch.__version__,
         triton          = has_triton(),
         torch_tensorrt  = has_torch_tensorrt(),
@@ -171,13 +171,13 @@ def detect() -> Capabilities:
 
 
 def print_report() -> Capabilities:
-    """Affiche un rapport complet et retourne l'objet Capabilities."""
+    """Print a full report and return the Capabilities object."""
     caps = detect()
-    print(f"Plateforme   : {caps.platform} ({'Colab' if caps.is_colab else 'local'})")
+    print(f"Platform     : {caps.platform} ({'Colab' if caps.is_colab else 'local'})")
     print(f"PyTorch      : {caps.torch_version}")
     print(f"CUDA         : {_OK + ' ' + caps.gpu_name if caps.cuda else _NO + ' (CPU)'}")
-    print(f"Backend compile recommandé : {caps.compile_backend}")
+    print(f"Recommended compile backend: {caps.compile_backend}")
     print()
-    print("Techniques d'optimisation disponibles :")
+    print("Available optimization techniques:")
     print(caps.matrix())
     return caps

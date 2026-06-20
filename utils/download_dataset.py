@@ -14,7 +14,7 @@ def download_coco_val(root_dir="datasets/coco"):
     ann_file = os.path.join(root_dir, "annotations", "instances_val2017.json")
 
     if not os.path.exists(ann_file):
-        print("Téléchargement des annotations...")
+        print("Downloading annotations...")
         r = requests.get(urls["annotations"], stream=True)
 
         with open(ann_zip_path, "wb") as f:
@@ -31,7 +31,7 @@ def download_coco_val(root_dir="datasets/coco"):
     img_dir = os.path.join(root_dir, "val2017")
 
     if not os.path.exists(img_dir):
-        print("Téléchargement des images (~1 GB)...")
+        print("Downloading images (~1 GB)...")
         r = requests.get(urls["images"], stream=True)
 
         with open(img_zip_path, "wb") as f:

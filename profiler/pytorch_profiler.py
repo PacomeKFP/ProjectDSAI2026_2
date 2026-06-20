@@ -1,44 +1,44 @@
 """
 profiler/pytorch_profiler.py
-────────────────────────────
-Profilage méso-scopique via torch.profiler.
+----------------------------
+Meso-scopic profiling via torch.profiler.
 
-Mécanique :
-  • torch.profiler.schedule gère les phases warmup / active nativement :
-      wait=0       : aucune itération sautée
-      warmup=N_W   : GPU chauffe, trace collectée mais non commitée
-      active=N_A   : trace commitée et exportée
-      repeat=1     : un seul cycle
-  • prof.step() avance la machine d'état interne à chaque itération.
-  • on_trace_ready exporte automatiquement en fin de phase active.
+Mechanics:
+  * torch.profiler.schedule manages the warmup / active phases natively:
+      wait=0       : no iterations skipped
+      warmup=N_W   : GPU warms up, trace is collected but not committed
+      active=N_A   : trace is committed and exported
+      repeat=1     : a single cycle
+  * prof.step() advances the internal state machine on every iteration.
+  * on_trace_ready exports automatically at the end of the active phase.
 
-Note sur les exports :
-  tensorboard_trace_handler et export_chrome_trace appellent tous deux
-  kineto_results.save() en interne → un seul export possible par run.
-  On utilise tensorboard_trace_handler : le fichier .pt.trace.json produit
-  est un Chrome JSON trace standard, lisible dans :
-    - TensorBoard  (onglet PyTorch Profiler)
+Note on exports:
+  tensorboard_trace_handler and export_chrome_trace both call
+  kineto_results.save() internally -> only one export possible per run.
+  We use tensorboard_trace_handler: the resulting .pt.trace.json file is a
+  standard Chrome JSON trace, readable in:
+    - TensorBoard  (PyTorch Profiler tab)
     - chrome://tracing
-    - ui.perfetto.dev  (recommandé, plus rapide que Chrome)
+    - ui.perfetto.dev  (recommended, faster than Chrome)
 
-Données collectées (maximum) :
-  CPU activities       — appels Python, ATen, BLAS, cuDNN dispatch
-  CUDA activities      — kernels GPU, copies mémoire, synchronisations
-  record_shapes=True   — forme des tenseurs d'entrée par opération
-  profile_memory=True  — allocations / désallocations / pic mémoire par op
-  with_stack=True      — pile d'appels Python→C++ complète
-  with_flops=True      — estimation FLOPs (conv2d, matmul, bmm)
-  with_modules=True    — attribution au niveau module nn.Module (≥ PyTorch 1.12)
+Data collected (maximum):
+  CPU activities       -- Python calls, ATen, BLAS, cuDNN dispatch
+  CUDA activities      -- GPU kernels, memory copies, synchronizations
+  record_shapes=True   -- input tensor shapes per operation
+  profile_memory=True  -- allocations / deallocations / peak memory per op
+  with_stack=True      -- full Python->C++ call stack
+  with_flops=True      -- FLOPs estimation (conv2d, matmul, bmm)
+  with_modules=True    -- attribution at the nn.Module level (>= PyTorch 1.12)
 
-Convention de nommage des runs :
+Run naming convention:
   <model_name>--<tagCamelCase>--<YYYYMMDD_HHMMSS>
-  Ex : retinanet_r50--baseline--20250609_143022
-       retinanet_r50--tensorRt--20250610_091500
+  Ex: retinanet_r50--baseline--20250609_143022
+      retinanet_r50--tensorRt--20250610_091500
 
-Sorties :
+Outputs:
   results/profiler/pytorch/<run_name>/
-    tensorboard/        ← TensorBoard  +  Chrome / Perfetto (.pt.trace.json)
-    summary.txt         ← tableau trié par cuda_time_total
+    tensorboard/        <- TensorBoard  +  Chrome / Perfetto (.pt.trace.json)
+    summary.txt         <- table sorted by cuda_time_total
     summary_by_shape.txt
     summary_by_stack.txt
 """
@@ -57,16 +57,16 @@ from torch.profiler import (
 from utils.tqdm_compat import tqdm
 
 
-# ── Utilitaires ────────────────────────────────────────────────────────────────
+# -- Utilities ------------------------------------------------------------------
 
 def _to_camel_case(tag: str) -> str:
     """
-    Convertit un tag texte libre en camelCase.
-    Exemples :
-      "baseline"    → "baseline"
-      "base line"   → "baseLine"
-      "tensor rt"   → "tensorRt"
-      "my new tag"  → "myNewTag"
+    Convert a free-form text tag to camelCase.
+    Examples:
+      "baseline"    -> "baseline"
+      "base line"   -> "baseLine"
+      "tensor rt"   -> "tensorRt"
+      "my new tag"  -> "myNewTag"
     """
     words = tag.strip().split()
     if not words:
@@ -88,7 +88,7 @@ def _supports_with_modules() -> bool:
         return False
 
 
-# ── Profiler principal ─────────────────────────────────────────────────────────
+# -- Main profiler --------------------------------------------------------------
 
 def profile_with_pytorch(
     model,
@@ -103,45 +103,45 @@ def profile_with_pytorch(
     device="cuda",
 ):
     """
-    Profile le forward pass avec torch.profiler (phases warmup/active natives).
+    Profile the forward pass with torch.profiler (native warmup/active phases).
 
     Parameters
     ----------
-    model         : nn.Module en mode eval — issu de load_model()
-    data          : LazySampleList — issu de load_profiling_data()
-                    Doit contenir au moins n_warmup + n_active éléments.
+    model         : nn.Module in eval mode -- from load_model()
+    data          : LazySampleList -- from load_profiling_data()
+                    Must contain at least n_warmup + n_active items.
     preprocess_fn : model.preprocess
     collate_fn    : model.collate
-    n_warmup      : itérations de chauffe (trace non exportée)
-    n_active      : itérations mesurées (trace exportée)
-    output_dir    : répertoire racine des sorties
-    model_name    : nom du modèle (préfixe du run)
-    tag           : tag du run, converti en camelCase
-                    Ex : "base line" → "baseLine"
-    device        : 'cuda' ou 'cpu'
+    n_warmup      : warm-up iterations (trace not exported)
+    n_active      : measured iterations (trace exported)
+    output_dir    : root output directory
+    model_name    : model name (run prefix)
+    tag           : run tag, converted to camelCase
+                    Ex: "base line" -> "baseLine"
+    device        : 'cuda' or 'cpu'
 
     Returns
     -------
     dict :
-        run_name     — identifiant complet du run (str)
-        tb_dir       — répertoire TensorBoard / traces (str)
-        summary_path — chemin tableau texte principal (str)
-        key_averages — EventList brut pour post-traitement
+        run_name     -- full run identifier (str)
+        tb_dir       -- TensorBoard / traces directory (str)
+        summary_path -- main text-table path (str)
+        key_averages -- raw EventList for post-processing
     """
     n_total = n_warmup + n_active
     if len(data) < n_total:
         raise ValueError(
-            f"data contient {len(data)} samples, besoin de {n_total} "
+            f"data contains {len(data)} samples, need {n_total} "
             f"(n_warmup={n_warmup} + n_active={n_active})."
         )
 
-    # ── Répertoires de sortie ──────────────────────────────────────────────────
+    # -- Output directories -----------------------------------------------------
     run  = _run_name(model_name, tag)
     out_dir = Path(output_dir) / run
     tb_dir  = out_dir / "tensorboard"
     tb_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Construction des kwargs profiler ──────────────────────────────────────
+    # -- Build profiler kwargs -------------------------------------------------
     profiler_kwargs = dict(
         activities=[ProfilerActivity.CPU],
         schedule=torch.profiler.schedule(
@@ -159,7 +159,7 @@ def profile_with_pytorch(
     if _supports_with_modules():
         profiler_kwargs["with_modules"] = True
 
-    # ── Boucle profilée ────────────────────────────────────────────────────────
+    # -- Profiled loop ----------------------------------------------------------
     model.eval()
     with profile(**profiler_kwargs) as prof:
         for s in data[:n_total]:
@@ -174,10 +174,10 @@ def profile_with_pytorch(
                 del gpu
 
             prof.step()
-    
 
-    # Export explicite de la trace Chrome JSON (.pt.trace.json)
-    # Lisible dans : chrome://tracing, ui.perfetto.dev, TensorBoard (profiler plugin)
+
+    # Explicit export of the Chrome JSON trace (.pt.trace.json)
+    # Readable in: chrome://tracing, ui.perfetto.dev, TensorBoard (profiler plugin)
     trace_path = tb_dir / f"{model_name}.pt.trace.json"
     # prof.export_chrome_trace(f"{model_name}.pt.trace.json")
 
@@ -185,7 +185,7 @@ def profile_with_pytorch(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    # ── Tableaux texte ─────────────────────────────────────────────────────────
+    # -- Text tables ------------------------------------------------------------
     def _write(path, content):
         Path(path).write_text(content, encoding="utf-8")
 
@@ -201,17 +201,17 @@ def profile_with_pytorch(
            prof.key_averages(group_by_stack_n=5)
                .table(sort_by="cuda_time_total", row_limit=40))
 
-    # ── Affichage résumé ───────────────────────────────────────────────────────
+    # -- Summary display --------------------------------------------------------
     print(f"\n{'='*62}")
-    print(f"  PyTorch Profiler — {run}")
+    print(f"  PyTorch Profiler -- {run}")
     print(f"{'='*62}")
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
     print(f"\n  Run         : {run}")
     # print(f"  Trace       : {trace_path}")
-    print(f"  Perfetto    : glisser le fichier sur ui.perfetto.dev")
-    print(f"  Chrome      : ouvrir chrome://tracing -> Load -> sélectionner le fichier")
+    print(f"  Perfetto    : drag the file onto ui.perfetto.dev")
+    print(f"  Chrome      : open chrome://tracing -> Load -> select the file")
     print(f"  TensorBoard : tensorboard --logdir {tb_dir}")
-    print(f"  Résumés     : {out_dir}/summary*.txt")
+    print(f"  Summaries   : {out_dir}/summary*.txt")
 
     return {
         "run_name":     run,
@@ -222,15 +222,15 @@ def profile_with_pytorch(
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Profilage léger pour l'orchestrateur — kernels / mémoire / opérations
-# ══════════════════════════════════════════════════════════════════════════════
-# Conçu d'après les remarques de l'utilisateur :
-#   • Pas d'export de trace (.json) : trop volumineux pour 1000 images, et
-#     l'export interne n'était pas fiablement retrouvé sur disque.
-#   • La fonction RETOURNE l'objet prof ; la sauvegarde (tables) est faite par
-#     l'appelant via profile_tables() — exactement le pattern demandé.
-#   • Active CPU + CUDA (l'ancien code n'activait que CPU → aucun kernel GPU).
+# ==============================================================================
+# Lightweight profiling for the orchestrator -- kernels / memory / operations
+# ==============================================================================
+# Designed based on user feedback:
+#   * No trace export (.json): too large for 1000 images, and the internal
+#     export was not reliably found on disk.
+#   * The function RETURNS the prof object; saving (tables) is done by the
+#     caller via profile_tables() -- exactly the requested pattern.
+#   * Activates CPU + CUDA (the old code only enabled CPU -> no GPU kernels).
 
 def run_profile(
     model,
@@ -242,11 +242,11 @@ def run_profile(
     device="cuda",
 ):
     """
-    Profile le forward (CPU+CUDA, mémoire, modules) sur n_active itérations.
-    Retourne l'objet `prof`. L'appelant extrait/sauvegarde via profile_tables().
+    Profile the forward (CPU+CUDA, memory, modules) over n_active iterations.
+    Returns the `prof` object. The caller extracts/saves via profile_tables().
 
-    On N'écrit aucun fichier ici et on n'exporte pas de trace : seules les
-    statistiques agrégées (key_averages) sont d'intérêt → légères, fouillables.
+    We write NO file here and we do not export a trace: only aggregated
+    statistics (key_averages) matter -> lightweight and searchable.
     """
     if len(data) < n_warmup + n_active:
         n_active = max(1, len(data) - n_warmup)
@@ -281,11 +281,11 @@ def run_profile(
 
 def profile_tables(prof, top=None):
     """
-    Convertit prof.key_averages() en DataFrame fouillable, trié par temps GPU.
+    Convert prof.key_averages() to a searchable DataFrame, sorted by GPU time.
 
-    Colonnes : op, count, temps CPU/CUDA (total + self, µs), mémoire CPU/CUDA
-    (total + self, octets), flops. Gère le renommage torch 2.x
-    (cuda_time_total → device_time_total, etc.).
+    Columns: op, count, CPU/CUDA time (total + self, us), CPU/CUDA memory
+    (total + self, bytes), flops. Handles the torch 2.x rename
+    (cuda_time_total -> device_time_total, etc.).
     """
     import pandas as pd
 
